@@ -1,5 +1,6 @@
 import io
 import shutil
+from dataclasses import replace
 
 import docx
 import pytest
@@ -192,6 +193,7 @@ MISSING = {"status": "Missing", "correctness": "Not assessed", "evidence": [], "
 
 @needs_ocr
 def test_exercise_screenshot_reaches_the_model(store, settings):
+    settings = replace(settings, ocr_enabled=True)
     """The case from real grading: the screenshot of 'aescrypt -h' is pasted under Exercise 1."""
     from grader.evaluate import SYSTEM_PROMPT, evaluate_submission
     from grader.models import Requirement, Scope
@@ -208,9 +210,9 @@ def test_exercise_screenshot_reaches_the_model(store, settings):
     [d], _ = evaluate_submission([req], scope, store, p, unread_content=False, top_k=2)
     system, user = p.prompts[0]
     assert "PROVES a" in system and "contains 1 screenshot(s)" in user
-    assert "aescrypt -h" in user and "contains screenshot text" in user
-    # a "Missing" verdict on a screenshot requirement always tells the TA to look at the screenshots
-    assert d.ta_review and any("confirm none of them shows" in r for r in d.review_reasons)
+    assert "$ aescrypt -h" in user and "contains screenshot text" in user  # the OCR text, not the notes
+    # the screenshot shows the instructed command, so "Missing" is overruled and the TA is pointed at it
+    assert d.status == "Unable to verify" and any('shows "aescrypt -h"' in r for r in d.review_reasons)
 
 
 def test_missing_screenshot_unverified_when_no_screenshot_was_checked(monkeypatch):
@@ -246,3 +248,71 @@ def test_missing_screenshot_unverified_when_no_screenshot_was_checked(monkeypatc
                               all_chunks=[text, shot], unread_content=False, injection_hits=[])
     assert d3.status == "Unable to verify"
     assert any("none were among the passages" in r for r in d3.review_reasons)
+
+
+def _pdf(pages):
+    """pages: lists of parts; a string is a text line, ("img", text) a pasted screenshot,
+    ("page", text) a whole page that is only a screenshot."""
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    for parts in pages:
+        y = 800
+        for part in parts:
+            if isinstance(part, tuple) and part[0] == "page":
+                c.drawImage(ImageReader(Image.open(_screenshot_png(part[1]))), 0, 300, 595, 65)
+            elif isinstance(part, tuple):
+                y -= 70
+                c.drawImage(ImageReader(Image.open(_screenshot_png(part[1]))), 50, y, 470, 52)
+                y -= 10
+            else:
+                c.drawString(50, y, part)
+                y -= 16
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@needs_ocr
+def test_pdf_screenshots_read_in_place():
+    data = _pdf([["Lab Exercise 1", "I ran uname to see the kernel.", ("img", "$ uname -a Linux ubuntu 6.8"),
+                  "Lab Exercise 2", "I checked the disk.", ("img", "$ df -h  Filesystem Size Used Avail")]])
+    [rep] = extract_file("lab.pdf", data, ocr=True)
+    text = rep.pages[0].text
+    assert text.index("Lab Exercise 1") < text.index("[Screenshot 1: OCR text") < text.index("uname -a") \
+        < text.index("Lab Exercise 2") < text.index("[Screenshot 2: OCR text") < text.index("df -h")
+    assert not has_unread_content([rep])
+
+
+@needs_ocr
+def test_pdf_screenshot_pages_are_marked_and_tied_to_their_exercise():
+    data = _pdf([["Lab Exercise 1", "The command prints the help text for the AES tool."],
+                 [("page", "$ aescrypt -h  usage: aescrypt -e|-d")]])
+    [rep] = extract_file("lab.pdf", data, ocr=True)
+    shot = rep.pages[1]
+    assert shot.method == "ocr"
+    assert "[Screenshot 1 follows: The command prints the help text" in shot.text
+    assert "[Screenshot 1: OCR text of the image begins]" in shot.text and "aescrypt" in shot.text
+
+
+@needs_ocr
+def test_screenshot_showing_the_command_is_never_missing(store, settings):
+    settings = replace(settings, ocr_enabled=True)
+    """The real case: Exercise 1 text on one page, its 'aescrypt -h' screenshot as the next page."""
+    from grader.evaluate import evaluate_submission
+    from grader.models import Requirement, Scope
+    from grader.pipeline import ingest_submission
+
+    filler = [[f"Notes {i}: virtual machines, networking and snapshots."] for i in range(6)]
+    data = _pdf(filler + [["Lab Exercise 1", "The command prints the help text for the AES tool."],
+                          [("page", "$ aescrypt -h  usage: aescrypt -e|-d")]] + filler)
+    scope = Scope("CS", "W2", "S001", "v1")
+    ingest_submission(store, scope, [("lab.pdf", data)], settings)
+    req = Requirement("R1", "Lab Exercise 1: Screenshot with the given command and expected output",
+                      "C1", notes="Instructions: Run aescrypt -h in the terminal and take a screenshot.")
+    [d], _ = evaluate_submission([req], scope, store, _Scripted(MISSING), unread_content=False, top_k=1)
+    assert d.status == "Unable to verify" and d.ta_review
+    assert any('shows "aescrypt -h"' in r for r in d.review_reasons)
+    assert any(e.verified and "page 8" in e.location for e in d.evidence)

@@ -55,30 +55,82 @@ def _ocr_page(name: str, page_no: int | None, img, ocr: bool) -> PageText:
                     ["Read with OCR; wording may contain recognition errors. Verify quoted evidence."])
 
 
+MIN_IMAGE_PT = 40  # smaller pictures (bullets, icons, logos) are ignored
+
+
 def extract_pdf(name: str, data: bytes, ocr: bool) -> ExtractionReport:
     import pdfplumber
 
     pages: list[PageText] = []
+    k = 0  # screenshot number across the whole file
+    prev_line = ""  # last line of readable text before the current page
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for i, page in enumerate(pdf.pages, start=1):
                 text = (page.extract_text() or "").strip()
-                if len(text) >= MIN_PAGE_CHARS:
-                    warn = []
-                    if page.images:
-                        warn.append(f"Page has {len(page.images)} embedded image(s) that were not read.")
-                    pages.append(PageText(name, i, text, "text", warn))
+                images = sorted((im for im in page.images
+                                 if im["x1"] - im["x0"] >= MIN_IMAGE_PT and im["bottom"] - im["top"] >= MIN_IMAGE_PT),
+                                key=lambda im: im["top"])
+                if len(text) >= MIN_PAGE_CHARS and not images:
+                    pages.append(PageText(name, i, text, "text", []))
+                    prev_line = _last_text_line(text)
                     continue
-                img = _render_pdf_page(data, i - 1)
-                pt = _ocr_page(name, i, img, ocr) if img is not None else PageText(
-                    name, i, text, "none", ["Page could not be rendered for OCR."])
-                if text and not pt.text:
-                    pt.text = text
-                pt.warnings.insert(0, "Page has little or no selectable text (likely scanned or a screenshot).")
-                pages.append(pt)
+                rendered = _render_pdf_page(data, i - 1) if ocr and ocr_available() else None
+                outcomes: dict[str, list[int]] = {"read": [], "little": [], "unread": []}
+                if len(text) < MIN_PAGE_CHARS:
+                    # the whole page is a picture: a scan, or a screenshot saved as its own page
+                    k += 1
+                    shot, outcome = _ocr_screenshot(k, rendered, ocr)
+                    outcomes[outcome].append(k)
+                    warns = ["Page has little or no selectable text (likely scanned or a screenshot)."]
+                    # tie the picture to the exercise it follows on the previous page
+                    context = [f"[Screenshot {k} follows: {prev_line[:100]}]"] if prev_line and not text else []
+                    body = "\n".join(([text] if text else []) + context + shot)
+                    pages.append(PageText(name, i, body, "none" if outcome == "unread" else "ocr",
+                                          warns + _image_warnings(outcomes, ocr)))
+                    prev_line = _last_text_line(text) or prev_line
+                    continue
+                lines, k = _pdf_page_with_images(page, images, rendered, ocr, k, outcomes)
+                pages.append(PageText(name, i, "\n".join(lines), "text+ocr", _image_warnings(outcomes, ocr)))
+                prev_line = _last_text_line(text)
     except Exception as exc:  # corrupt or encrypted PDFs
         return ExtractionReport(name, "pdf", [], False, [f"PDF could not be opened: {exc}"])
     return _report(name, "pdf", pages)
+
+
+def _pdf_page_with_images(page, images, rendered, ocr: bool, k: int, outcomes: dict[str, list[int]]):
+    """Text and pictures in reading order: the text above each picture, then the picture's OCR text."""
+    lines: list[str] = []
+    scale = rendered.width / float(page.width) if rendered is not None else 1.0
+    top = 0.0
+    for im in images:
+        lines.append(_crop_text(page, top, im["top"]))
+        k += 1
+        crop = None
+        if rendered is not None:
+            box = (max(0, im["x0"]), max(0, im["top"]), min(page.width, im["x1"]), min(page.height, im["bottom"]))
+            crop = rendered.crop(tuple(int(v * scale) for v in box))
+        shot, outcome = _ocr_screenshot(k, crop, ocr)
+        lines.extend(shot)
+        outcomes[outcome].append(k)
+        top = max(top, im["bottom"])
+    lines.append(_crop_text(page, top, page.height))
+    return [ln for ln in lines if ln], k
+
+
+def _last_text_line(text: str) -> str:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _crop_text(page, top: float, bottom: float) -> str:
+    top, bottom = max(0.0, top), min(float(page.height), bottom)
+    if bottom - top < 1:
+        return ""
+    try:
+        return (page.crop((0, top, page.width, bottom), strict=False).extract_text() or "").strip()
+    except Exception:
+        return ""
 
 
 def _render_pdf_page(data: bytes, index: int):
@@ -116,21 +168,44 @@ def _paragraph_line(para) -> str:
 
 
 def _screenshot_lines(k: int, blob: bytes, ocr: bool) -> tuple[list[str], str]:
-    """Inline text for one picture, plus its outcome: "read", "little", "unread"."""
+    """Inline text for one embedded picture, plus its outcome: "read", "little", "unread"."""
     from PIL import Image
 
     if not (ocr and ocr_available()):
-        return [f"[Screenshot {k}: image present; not read because OCR is unavailable]"], "unread"
+        return _ocr_screenshot(k, None, ocr)
     try:
         img = Image.open(io.BytesIO(blob))
         img.load()
     except Exception:
         return [f"[Screenshot {k}: image present; its format could not be opened]"], "unread"
+    return _ocr_screenshot(k, img, ocr)
+
+
+def _ocr_screenshot(k: int, img, ocr: bool) -> tuple[list[str], str]:
+    if not (ocr and ocr_available()):
+        return [f"[Screenshot {k}: image present; not read because OCR is unavailable]"], "unread"
+    if img is None:
+        return [f"[Screenshot {k}: image present; it could not be rendered]"], "unread"
     text = _ocr_image(img).strip()
     if len(text) < MIN_PAGE_CHARS:
         body = [text] if text else []
         return [f"[Screenshot {k}: image present; OCR found little or no text]", *body], "little"
     return [SCREENSHOT_OPEN.format(k=k), text, SCREENSHOT_CLOSE.format(k=k)], "read"
+
+
+def _image_warnings(outcomes: dict[str, list[int]], ocr: bool) -> list[str]:
+    warnings = []
+    if outcomes["read"]:
+        warnings.append(f"{len(outcomes['read'])} screenshot(s) read with OCR; wording may contain recognition "
+                        "errors. Verify quoted evidence.")
+    if outcomes["little"]:
+        warnings.append(f"Screenshot(s) {_numbers(outcomes['little'])}: OCR found little or no text (diagram, "
+                        "photo or blurry image). TA must check them.")
+    if outcomes["unread"]:
+        why = "OCR is off" if not ocr else "Tesseract is not installed or the image could not be opened"
+        warnings.append(f"Document contains {len(outcomes['unread'])} image(s) (screenshots, figures) that were not "
+                        f"read because {why}. TA must check them.")
+    return warnings
 
 
 def extract_docx(name: str, data: bytes, ocr: bool = True) -> ExtractionReport:
@@ -165,17 +240,7 @@ def extract_docx(name: str, data: bytes, ocr: bool = True) -> ExtractionReport:
             add_images(child)
     text = "\n".join(lines).strip()
 
-    warnings = []
-    if outcomes["read"]:
-        warnings.append(f"{len(outcomes['read'])} screenshot(s) read with OCR; wording may contain recognition "
-                        "errors. Verify quoted evidence.")
-    if outcomes["little"]:
-        warnings.append(f"Screenshot(s) {_numbers(outcomes['little'])}: OCR found little or no text (diagram, "
-                        "photo or blurry image). TA must check them.")
-    if outcomes["unread"]:
-        why = "OCR is off" if not ocr else "Tesseract is not installed or the image could not be opened"
-        warnings.append(f"Document contains {len(outcomes['unread'])} image(s) (screenshots, figures) that were not "
-                        f"read because {why}. TA must check them.")
+    warnings = _image_warnings(outcomes, ocr)
     method = "text+ocr" if outcomes["read"] or outcomes["little"] else "text"
     return _report(name, "docx", [PageText(name, None, text, method, warnings)])
 

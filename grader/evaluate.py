@@ -78,6 +78,36 @@ def asks_for_screenshot(requirement: Requirement) -> bool:
     return bool(SCREENSHOT_WORDS_RE.search(f"{requirement.description} {requirement.notes or ''}"))
 
 
+COMMAND_RE = re.compile(r"\b[a-z][\w.]*(?:\s+--?[a-z][\w-]*)+", re.I)
+QUOTED_RE = re.compile(r"[`'\"\u2018\u2019\u201c\u201d]([^`'\"\u2018\u2019\u201c\u201d\n]{3,40})[`'\"\u2018\u2019\u201c\u201d]")
+
+
+def _ocr_norm(s: str) -> str:
+    s = s.lower().replace("\u2014", "-").replace("\u2013", "-")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def instructed_commands(requirement: Requirement) -> list[str]:
+    """Commands named in the requirement or its instruction notes, e.g. "aescrypt -h"."""
+    text = f"{requirement.description}\n{requirement.notes or ''}"
+    found = [m.group(0) for m in COMMAND_RE.finditer(text)] + QUOTED_RE.findall(text)
+    out = []
+    for cmd in map(_ocr_norm, found):
+        if " -" in cmd and cmd not in out:  # a program plus a flag is specific enough to match on
+            out.append(cmd)
+    return out
+
+
+def screenshot_showing_command(requirement: Requirement, all_chunks: list[Chunk]) -> tuple[str, Chunk, str] | None:
+    """A screenshot whose OCR text contains a command the instructions ask for."""
+    for cmd in instructed_commands(requirement):
+        for c in all_chunks:
+            if c.ocr and cmd in _ocr_norm(c.text):
+                line = next((ln for ln in c.text.splitlines() if cmd in _ocr_norm(ln)), cmd)
+                return cmd, c, line.strip()
+    return None
+
+
 def screenshot_count(chunks: list[Chunk]) -> int:
     """Distinct screenshots inlined by extraction, counted per file."""
     return len({(c.file, m) for c in chunks for m in SCREENSHOT_MARKER_RE.findall(c.text)})
@@ -212,6 +242,12 @@ def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider
             status = "Unable to verify"
             reasons.append("Part of the submission could not be read (scans, images or unsupported files); "
                            "the work may be there. Not counted as missing.")
+        elif asks_for_screenshot(requirement) and (shown := screenshot_showing_command(requirement, all_chunks)):
+            cmd, chunk, line = shown
+            status = "Unable to verify"
+            evidence.append(Evidence(line, chunk.location(), chunk.chunk_id, True))
+            reasons.append(f"The model said this is missing, but screenshot text at {chunk.location()} shows "
+                           f"\"{cmd}\", which this requirement asks for. Check that screenshot.")
         elif asks_for_screenshot(requirement) and n_screenshots:
             if not any(c.ocr for c in candidates):
                 status = "Unable to verify"

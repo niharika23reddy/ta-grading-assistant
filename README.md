@@ -101,10 +101,12 @@ Use anonymized codes such as `S001`.
 - **Failed retrieval is not absence.** Vector search is followed by a keyword scan of the whole
   submission. "Missing" becomes "Unable to verify" if the submission is empty or any part of it
   could not be read (scans, images, unsupported files).
-- **Screenshots stay with their exercise.** In Word files, each pasted screenshot's OCR text is
+- **Screenshots stay with their exercise.** In Word and PDF files, each screenshot's OCR text is
   placed exactly where it appears, between `[Screenshot N: ...]` markers, so it shares a passage
-  with the exercise heading. Requirements that ask for a screenshot are always shown the related
-  screenshots, and "Missing" becomes "Unable to verify" if no screenshot could be checked.
+  with the exercise heading. A PDF page that is only a screenshot is labelled with the line of text
+  it follows. Requirements that ask for a screenshot are always shown the related screenshots, and
+  "Missing" becomes "Unable to verify" if no screenshot could be checked, or if a screenshot's text
+  shows the command the instructions name (for example `aescrypt -h`).
 - **No penalty for extraction failure.** Unreadable pages are listed and never scored as zero.
 - **Isolation.** Student queries filter on role, course, assignment, student and version.
   Reference answers have their own role and are shown to the model as instructor-only context.
