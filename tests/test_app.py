@@ -37,3 +37,13 @@ def test_app_runs_review_end_to_end(tmp_path, monkeypatch, settings, sample_chec
     assert len(decisions) == 7
     assert any("Suggested total" in m.value for m in at.markdown)
     assert (tmp_path / "reviews" / "DATA101__A1__S001__v1.json").exists()
+
+    # A TA edit belongs to that run: running the evaluation again starts the fields from the new suggestions.
+    first = next(s for s in at.selectbox if s.label == "Your status")
+    first.set_value("Unable to verify" if first.value != "Unable to verify" else "Met")
+    at.run()
+    next(b for b in at.button if b.label == "Run evaluation").click()
+    at.run()
+    assert not at.exception
+    shown = [s.value for s in at.selectbox if s.label == "Your status"]
+    assert shown == [d.status for d in at.session_state["decisions"]]

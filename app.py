@@ -250,6 +250,7 @@ with tab3:
             progress=lambda i, n, r: bar.progress(i / n, text=f"Checking {r.req_id}..."))
         bar.progress(1.0, text="Done")
         ss.decisions, ss.injection_hits = decisions, hits
+        ss.review_run = ss.get("review_run", 0) + 1  # fresh TA fields that start from the new suggestions
         ss.ta_feedback = draft_feedback(decisions)
         review_path.write_text(json.dumps({"decisions": [d.to_dict() for d in decisions],
                                            "injection_hits": hits}, indent=2))
@@ -269,6 +270,9 @@ with tab3:
         if ss.get("indexed_scope") == scope and has_unread_content(ss.reports):
             st.warning("Some content could not be read. Related items are 'Unable to verify', never 'Missing'.")
 
+        # Widget keys include the student and the evaluation run, so TA fields never carry
+        # values over from another student or from an earlier run.
+        wk = f"{review_path.stem}-{ss.get('review_run', 0)}"
         ta_rows = []
         for d in ss.decisions:
             flag = " 🔎 TA review" if d.ta_review else ""
@@ -287,10 +291,10 @@ with tab3:
                     st.markdown("**Why TA review:**\n" + "\n".join(f"- {r}" for r in d.review_reasons))
                 c1, c2 = st.columns(2)
                 ta_status = c1.selectbox("Your status", STATUSES, index=STATUSES.index(d.status),
-                                         key=f"st_{d.req_id}")
+                                         key=f"st_{wk}_{d.req_id}")
                 ta_corr = c2.selectbox("Your correctness", CORRECTNESS, index=CORRECTNESS.index(d.correctness),
-                                       key=f"co_{d.req_id}")
-                comment = st.text_input("Your comment", key=f"cm_{d.req_id}")
+                                       key=f"co_{wk}_{d.req_id}")
+                comment = st.text_input("Your comment", key=f"cm_{wk}_{d.req_id}")
                 ta_rows.append({"req_id": d.req_id, "status": ta_status, "correctness": ta_corr,
                                 "comment": comment})
         ss.ta_rows = ta_rows
@@ -319,7 +323,7 @@ with tab3:
                        f"{'unresolved' if tb.suggested_points is None else f'{tb.suggested_points:g}'}")
             approved[cs.criterion_id] = c3.number_input(
                 f"Approved points {cs.criterion_id}", min_value=0.0, max_value=float(cs.max_points),
-                value=None, step=0.5, key=f"ap_{cs.criterion_id}")
+                value=None, step=0.5, key=f"ap_{wk}_{cs.criterion_id}")
         st.markdown(f"**Suggested total:** {suggested.suggested_total:g} / {suggested.max_total:g}"
                     + ("" if suggested.complete else f" (unresolved: {', '.join(suggested.unresolved)})"))
         total, problems = approved_total(approved, cl.criteria)
