@@ -12,7 +12,8 @@ import streamlit as st
 
 from grader import export
 from grader.checklist import (Checklist, attach_instruction_context, draft_requirements, draft_rubric_from_text,
-                              find_conflicts, parse_requirements_csv, read_rubric_csv)
+                              find_conflicts, parse_requirements_csv, read_rubric_csv,
+                              split_per_item_requirements)
 from grader.config import get_settings
 from grader.embeddings import get_embedder
 from grader.evaluate import evaluate_submission
@@ -107,7 +108,7 @@ with tab1:
         elif rubric_reqs:
             # The rubric's level descriptions name the deliverables and are already linked to
             # criteria; the instructions supply the exact commands and questions as notes.
-            reqs = rubric_reqs
+            reqs = split_per_item_requirements(rubric_reqs, criteria, instr_text)
             attach_instruction_context(reqs, criteria, instr_text)
         else:
             reqs = draft_requirements(instr_text)
@@ -137,11 +138,12 @@ with tab1:
                    "Points are never invented.")
         crit_rows = [{"criterion_id": c.criterion_id, "description": c.description, "max_points": c.max_points,
                       "full_points": c.levels.get("full"), "partial_points": c.levels.get("partial"),
-                      "none_points": c.levels.get("none"), "notes": c.notes} for c in cl.criteria]
+                      "none_points": c.levels.get("none"), "per_item_points": c.levels.get("per_item"),
+                      "notes": c.notes} for c in cl.criteria]
         crit_df = st.data_editor(
             pd.DataFrame(crit_rows or [{"criterion_id": "C1", "description": "", "max_points": 0.0,
                                         "full_points": None, "partial_points": None, "none_points": None,
-                                        "notes": ""}]),
+                                        "per_item_points": None, "notes": ""}]),
             num_rows="dynamic", use_container_width=True, key="crit_editor")
 
         def from_editors() -> Checklist:
@@ -153,7 +155,7 @@ with tab1:
             for r in crit_df.to_dict("records"):
                 if not str(r.get("criterion_id") or "").strip():
                     continue
-                levels = {k: float(r[f"{k}_points"]) for k in ("full", "partial", "none")
+                levels = {k: float(r[f"{k}_points"]) for k in ("full", "partial", "none", "per_item")
                           if r.get(f"{k}_points") is not None and not pd.isna(r.get(f"{k}_points"))}
                 crits.append(Criterion(str(r["criterion_id"]).strip(), str(r["description"] or ""),
                                        float(r["max_points"] or 0), levels, str(r.get("notes") or "")))
