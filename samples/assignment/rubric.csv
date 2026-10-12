@@ -1,0 +1,7 @@
+criterion_id,description,max_points,full_points,partial_points,none_points
+C1,Introduction and research question,2,2,1,0
+C2,Data loading and dataset size,3,3,,0
+C3,Summary statistics and interpretation,5,5,2.5,0
+C4,Histogram with labelled axes and title,3,3,1.5,0
+C5,clean_data function,4,4,2,0
+C6,Limitations and references,3,3,1,0
