@@ -26,6 +26,7 @@ class Settings:
     top_k: int
     chunk_chars: int
     chunk_overlap: int
+    unverified_as_missing: bool = True  # score "Unable to verify" like "Missing" (provisional)
 
 
 def get_settings(**overrides) -> Settings:
@@ -41,6 +42,7 @@ def get_settings(**overrides) -> Settings:
         top_k=int(os.getenv("TOP_K", "6")),
         chunk_chars=int(os.getenv("CHUNK_CHARS", "900")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        unverified_as_missing=_bool("UNVERIFIED_AS_MISSING", True),
     )
     values.update(overrides)
     return Settings(**values)
