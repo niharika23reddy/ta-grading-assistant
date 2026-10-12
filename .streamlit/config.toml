@@ -1,0 +1,8 @@
+# Keep the app private to this computer.
+[server]
+# Only this Mac can open the app (no access from other devices on the network).
+address = "localhost"
+
+[browser]
+# Do not send Streamlit usage statistics.
+gatherUsageStats = false
