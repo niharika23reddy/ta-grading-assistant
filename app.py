@@ -201,6 +201,8 @@ with tab2:
         rows = [{"file": r.file, "type": r.file_type, "readable": r.readable,
                  "pages/parts": len(r.pages), "characters": len(r.text),
                  "OCR pages": sum(p.method == "ocr" for p in r.pages),
+                 "screenshots": sum(p.text.count(": image present;") + p.text.count(": OCR text of the image begins]")
+                                    for p in r.pages),
                  "unread pages": sum(p.method == "none" for p in r.pages)} for r in ss.reports]
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
         warns = unreadable_parts(ss.reports)

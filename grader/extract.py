@@ -91,55 +91,97 @@ def _render_pdf_page(data: bytes, index: int):
         return None
 
 
-def _docx_images(document) -> list[bytes]:
-    """Embedded pictures in document order (screenshots pasted into the report)."""
+SCREENSHOT_OPEN = "[Screenshot {k}: OCR text of the image begins]"
+SCREENSHOT_CLOSE = "[Screenshot {k}: OCR text of the image ends]"
+
+
+def _element_images(element, part) -> list[bytes]:
+    """Pictures inside one paragraph or table, in order (DrawingML and older VML)."""
+    rids = element.xpath(".//a:blip/@r:embed") + element.xpath('.//*[local-name()="imagedata"]/@r:id')
     blobs = []
-    for shape in document.inline_shapes:
+    for rid in rids:
         try:
-            rid = shape._inline.graphic.graphicData.pic.blipFill.blip.embed
-            blobs.append(document.part.related_parts[rid].blob)
+            blobs.append(part.related_parts[rid].blob)
         except Exception:
             blobs.append(b"")
     return blobs
 
 
+def _paragraph_line(para) -> str:
+    # Word's automatic numbering and bullets are not part of the paragraph text,
+    # so mark list items explicitly; checklist drafting relies on them.
+    style = (para.style.name if para.style is not None else "") or ""
+    is_list = style.lower().startswith("list") or para._p.pPr is not None and para._p.pPr.numPr is not None
+    return f"- {para.text}" if is_list and para.text.strip() else para.text
+
+
+def _screenshot_lines(k: int, blob: bytes, ocr: bool) -> tuple[list[str], str]:
+    """Inline text for one picture, plus its outcome: "read", "little", "unread"."""
+    from PIL import Image
+
+    if not (ocr and ocr_available()):
+        return [f"[Screenshot {k}: image present; not read because OCR is unavailable]"], "unread"
+    try:
+        img = Image.open(io.BytesIO(blob))
+        img.load()
+    except Exception:
+        return [f"[Screenshot {k}: image present; its format could not be opened]"], "unread"
+    text = _ocr_image(img).strip()
+    if len(text) < MIN_PAGE_CHARS:
+        body = [text] if text else []
+        return [f"[Screenshot {k}: image present; OCR found little or no text]", *body], "little"
+    return [SCREENSHOT_OPEN.format(k=k), text, SCREENSHOT_CLOSE.format(k=k)], "read"
+
+
 def extract_docx(name: str, data: bytes, ocr: bool = True) -> ExtractionReport:
     import docx
-    from PIL import Image
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:
         return ExtractionReport(name, "docx", [], False, [f"DOCX could not be opened: {exc}"])
-    lines = []
-    for para in document.paragraphs:
-        # Word's automatic numbering and bullets are not part of the paragraph text,
-        # so mark list items explicitly; checklist drafting relies on them.
-        style = (para.style.name if para.style is not None else "") or ""
-        is_list = style.lower().startswith("list") or para._p.pPr is not None and para._p.pPr.numPr is not None
-        lines.append(f"- {para.text}" if is_list and para.text.strip() else para.text)
-    for table in document.tables:
-        for row in table.rows:
-            lines.append(" | ".join(cell.text.strip() for cell in row.cells))
-    text = "\n".join(lines).strip()
-    pages = [PageText(name, None, text, "text", [])]
+    part = document.part
+    lines: list[str] = []
+    outcomes: dict[str, list[int]] = {"read": [], "little": [], "unread": []}
 
-    images = _docx_images(document)
-    if images and not (ocr and ocr_available()):
-        why = "OCR is off" if not ocr else "Tesseract is not installed"
-        pages[0].warnings.append(f"Document contains {len(images)} image(s) (screenshots, figures) that were not "
-                                 f"read because {why}. TA must check them.")
-    elif images:
-        for k, blob in enumerate(images, start=1):
-            label = f"{name} (image {k})"
-            try:
-                img = Image.open(io.BytesIO(blob))
-                img.load()
-            except Exception:
-                pages.append(PageText(label, None, "", "none", ["Image format could not be opened. TA must check it."]))
-                continue
-            pages.append(_ocr_page(label, None, img, ocr))
-    return _report(name, "docx", pages)
+    def add_images(element):
+        # Screenshots stay where the student pasted them, next to the exercise they belong to.
+        for blob in _element_images(element, part):
+            k = sum(len(v) for v in outcomes.values()) + 1
+            shot, outcome = _screenshot_lines(k, blob, ocr)
+            lines.extend(shot)
+            outcomes[outcome].append(k)
+
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            lines.append(_paragraph_line(Paragraph(child, document)))
+            add_images(child)
+        elif child.tag == qn("w:tbl"):
+            for row in Table(child, document).rows:
+                lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+            add_images(child)
+    text = "\n".join(lines).strip()
+
+    warnings = []
+    if outcomes["read"]:
+        warnings.append(f"{len(outcomes['read'])} screenshot(s) read with OCR; wording may contain recognition "
+                        "errors. Verify quoted evidence.")
+    if outcomes["little"]:
+        warnings.append(f"Screenshot(s) {_numbers(outcomes['little'])}: OCR found little or no text (diagram, "
+                        "photo or blurry image). TA must check them.")
+    if outcomes["unread"]:
+        why = "OCR is off" if not ocr else "Tesseract is not installed or the image could not be opened"
+        warnings.append(f"Document contains {len(outcomes['unread'])} image(s) (screenshots, figures) that were not "
+                        f"read because {why}. TA must check them.")
+    method = "text+ocr" if outcomes["read"] or outcomes["little"] else "text"
+    return _report(name, "docx", [PageText(name, None, text, method, warnings)])
+
+
+def _numbers(ks: list[int]) -> str:
+    return ", ".join(str(k) for k in ks)
 
 
 def extract_text(name: str, data: bytes) -> ExtractionReport:

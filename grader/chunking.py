@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from .models import Chunk, ExtractionReport
 
@@ -17,9 +18,28 @@ def chunk_reports(reports: list[ExtractionReport], prefix: str, chunk_chars: int
     return chunks
 
 
+SHOT_OPEN_RE = re.compile(r"^\[Screenshot (\d+): OCR text of the image begins\]$")
+SHOT_CLOSE_RE = re.compile(r"^\[Screenshot (\d+): OCR text of the image ends\]$")
+SHOT_ANY_RE = re.compile(r"^\[Screenshot \d+:")
+
+
+def _screenshot_lines(lines: list[str]) -> list[bool]:
+    """Which lines hold a screenshot marker or OCR text from a screenshot inlined by extraction."""
+    flags, inside = [], False
+    for line in lines:
+        s = line.strip()
+        if SHOT_OPEN_RE.match(s):
+            inside = True
+        flags.append(inside or bool(SHOT_ANY_RE.match(s)))
+        if SHOT_CLOSE_RE.match(s):
+            inside = False
+    return flags
+
+
 def _chunk_page(text: str, file: str, page, prefix: str, size: int, overlap: int,
                 ocr: bool = False) -> list[Chunk]:
     lines = text.splitlines() or [text]
+    shot = _screenshot_lines(lines)
     offsets, pos = [], 0
     for line in lines:
         offsets.append(pos)
@@ -39,7 +59,8 @@ def _chunk_page(text: str, file: str, page, prefix: str, size: int, overlap: int
                 chunk_id=hashlib.sha1(key.encode()).hexdigest()[:16],
                 text=body, file=file, page=page,
                 line_start=start + 1, line_end=end,
-                char_start=offsets[start], char_end=offsets[start] + len(body), ocr=ocr,
+                char_start=offsets[start], char_end=offsets[start] + len(body),
+                ocr=ocr or any(shot[start:end]),
             ))
         if end >= len(lines):
             break
