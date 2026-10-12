@@ -126,6 +126,8 @@ def _num(val: str) -> float | None:
 PTS_HEADER = re.compile(r"\b(pts?|points?|marks?)\b", re.I)
 NUMBERED_ITEM = re.compile(r"(?:^|\s)\d+[.)]\s+")
 PER_ITEM_RULE = re.compile(r"\b(each|per)\b", re.I)
+PER_ITEM_POINTS = re.compile(r"\b(?:each|per)\b[^.]*?\b(?:worth|is|=|gets?|earns?|receives?)\s*"
+                             r"(\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)", re.I)
 
 
 def _parse_level_rubric(rows: list[list[str]]) -> RubricCSV:
@@ -165,6 +167,11 @@ def _parse_level_rubric(rows: list[list[str]]) -> RubricCSV:
         middles = pts[1:-1]
         if middles:
             levels["partial"] = middles[0][2]
+            for _, ltext, _ in middles:
+                m = PER_ITEM_POINTS.search(ltext)
+                if m:
+                    levels["per_item"] = float(m.group(1))
+                    break
             for lname, ltext, lpts in middles:
                 notes.append(f"{lname} ({lpts:g} pts): {ltext}".strip())
             if len(middles) > 1:
@@ -179,15 +186,11 @@ def _parse_level_rubric(rows: list[list[str]]) -> RubricCSV:
     return RubricCSV(criteria, reqs, total)
 
 
-def attach_instruction_context(reqs: list[Requirement], criteria: list[Criterion], instructions: str,
-                               limit: int = 700) -> None:
-    """Copy the part of the instructions that belongs to each criterion (e.g. the "Lab Exercise 2"
-    section) into its requirements' notes, so the reviewer knows the exact command or question."""
-    if not instructions.strip():
-        return
+def instruction_sections(criteria: list[Criterion], instructions: str) -> dict[str, str]:
+    """The part of the instructions that belongs to each criterion, e.g. its "Lab Exercise 2" section."""
     starts = {}
     for c in criteria:
-        m = re.search(re.escape(c.description), instructions, re.I)
+        m = re.search(re.escape(c.description), instructions, re.I) if c.description else None
         if not m:
             num = re.search(r"(\d+)\s*$", c.description)
             word = re.sub(r"\s*\d+\s*$", "", c.description).split()[-1:] if num else []
@@ -200,11 +203,49 @@ def attach_instruction_context(reqs: list[Requirement], criteria: list[Criterion
     for i, (cid, pos) in enumerate(ordered):
         end = ordered[i + 1][1] if i + 1 < len(ordered) else len(instructions)
         sections[cid] = re.sub(r"\n{2,}", "\n", instructions[pos:end]).strip()
+    return sections
+
+
+def attach_instruction_context(reqs: list[Requirement], criteria: list[Criterion], instructions: str,
+                               limit: int = 700) -> None:
+    """Copy each criterion's instruction section into its requirements' notes, so the reviewer
+    knows the exact command or question."""
+    if not instructions.strip():
+        return
+    sections = instruction_sections(criteria, instructions)
     for r in reqs:
         sec = sections.get(r.criterion_id)
         if sec and not r.notes:
             clipped = sec if len(sec) <= limit else sec[:limit].rsplit(" ", 1)[0] + " ..."
             r.notes = "From the instructions: " + clipped
+
+
+def split_per_item_requirements(reqs: list[Requirement], criteria: list[Criterion],
+                                instructions: str) -> list[Requirement]:
+    """For criteria scored per item (e.g. "each software installation is worth 0.45 points"), replace
+    the single drafted requirement with one per list item in that criterion's instruction section.
+    Requirements are renumbered. Criteria whose section has fewer than two list items are left as is."""
+    sections = instruction_sections(criteria, instructions) if instructions.strip() else {}
+    out = []
+    for r in reqs:
+        crit = next((c for c in criteria if c.criterion_id == r.criterion_id), None)
+        items = []
+        if crit is not None and "per_item" in crit.levels and r.criterion_id in sections:
+            items = [ln[2:].strip() for ln in sections[r.criterion_id].splitlines()
+                     if ln.startswith("- ") and len(ln.strip()) > 4]
+        if len(items) >= 2 and not any(o.criterion_id == r.criterion_id and o.notes.startswith("Item ")
+                                       for o in out):
+            for k, item in enumerate(items, start=1):
+                out.append(Requirement("", f"{crit.description}: {item}", r.criterion_id, r.check_correctness,
+                                       r.needs_execution, f"Item {k} of {len(items)} (per-item rule: "
+                                       f"{crit.levels['per_item']:g} points each)."))
+        elif len(items) >= 2:
+            continue  # duplicate drafted requirement for an already-split criterion
+        else:
+            out.append(r)
+    for i, r in enumerate(out, start=1):
+        r.req_id = f"R{i}"
+    return out
 
 
 def _parse_template_rubric(text: str) -> list[Criterion]:
@@ -297,6 +338,17 @@ def find_conflicts(checklist: Checklist, instructions_text: str = "", rubric_tex
             issues.append(f"Rubric criterion {c.criterion_id} ({c.description}) has no matching requirement in the instructions.")
         if "partial" not in c.levels:
             issues.append(f"{c.criterion_id} has no partial-credit rule; partial work will be left for the TA.")
+        elif "per_item" in c.levels:
+            n_items = sum(1 for r in checklist.requirements if r.criterion_id == c.criterion_id)
+            each = c.levels["per_item"]
+            if n_items < 2:
+                issues.append(f"{c.criterion_id} ({c.description}) is scored at {each:g} points per item. Add one "
+                              f"requirement per item (e.g. per software), linked to {c.criterion_id}, so "
+                              f"partial credit can be counted; until then it stays provisional.")
+            elif abs(each * n_items - c.max_points) > 1e-9:
+                issues.append(f"{c.criterion_id}: {n_items} items x {each:g} = {each * n_items:g} points, but the "
+                              f"criterion is worth {c.max_points:g}. Partial credit is counted per item and "
+                              f"capped at {c.max_points:g}; all items done gives full credit.")
         elif PER_ITEM_RULE.search(c.notes or ""):
             issues.append(f"{c.criterion_id} ({c.description}) describes a per-item partial-credit rule "
                           f"that differs from its fixed partial points; partial scores there stay provisional.")

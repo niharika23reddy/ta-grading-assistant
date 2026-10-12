@@ -94,6 +94,19 @@ def score(criteria: list[Criterion], requirements: list[Requirement], decisions:
             pts = c.levels.get("full", c.max_points)
         elif level == "none":
             pts = c.levels.get("none", 0.0)
+        elif level == "partial" and "per_item" in c.levels and len(reqs) >= 2:
+            # Rubric rule such as "each software installation is worth 0.45 points".
+            each = c.levels["per_item"]
+            done = [r for r in reqs if by_req[r.req_id].status == "Met"]
+            half = [r for r in reqs if by_req[r.req_id].status == "Partially met"]
+            pts = round(min(c.max_points, each * len(done)), 2)
+            notes.append(f"Per-item rule: {len(done)} of {len(reqs)} items done x {each:g} = {pts:g}.")
+            if half:
+                provisional = True
+                notes.append(f"{len(half)} item(s) partially done count as 0; check them.")
+        elif level == "partial" and "per_item" in c.levels:
+            pts, provisional = None, True
+            notes.append("Per-item rule needs one requirement per item; TA must decide the points.")
         elif level == "partial" and "partial" in c.levels:
             pts = c.levels["partial"]
             if PER_ITEM_RULE.search(c.notes or ""):
