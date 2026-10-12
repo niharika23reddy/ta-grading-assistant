@@ -1,6 +1,9 @@
-import pytest
+import io
 
-from grader.checklist import Checklist, draft_rubric_from_text, find_conflicts
+import docx
+
+from grader.checklist import Checklist, draft_requirements, draft_rubric_from_text, find_conflicts
+from grader.extract import extract_file
 from grader.models import Criterion, Decision, Requirement
 from grader.scoring import approved_total, score
 
@@ -85,3 +88,35 @@ def test_rubric_text_draft_never_invents_partial_credit():
 def test_checklist_json_roundtrip(sample_checklist):
     again = Checklist.from_json(sample_checklist.to_json())
     assert again.to_json() == sample_checklist.to_json()
+
+
+def test_word_numbered_lists_and_plain_instructions_are_drafted():
+    d = docx.Document()
+    d.add_heading("Virtual Lab Set Up", 1)
+    d.add_paragraph("In this lab you will set up your virtual machine.")
+    d.add_paragraph("Download and install VirtualBox on your computer.", style="List Number")
+    d.add_paragraph("Take a screenshot of the VM running.", style="List Bullet")
+    d.add_paragraph("You must submit a single Word document.")
+    buf = io.BytesIO()
+    d.save(buf)
+    [rep] = extract_file("lab.docx", buf.getvalue())
+    assert [r.description for r in draft_requirements(rep.text)] == [
+        "Download and install VirtualBox on your computer.",
+        "Take a screenshot of the VM running.",
+        "You must submit a single Word document."]
+
+
+def test_rubric_table_rows_become_criteria_without_partial_credit():
+    d = docx.Document()
+    t = d.add_table(rows=4, cols=3)
+    rows = [("Criteria", "Description", "Points"), ("VM installed", "VirtualBox runs", "5"),
+            ("Screenshot", "Shows the desktop", "3 pts"), ("Total", "", "8")]
+    for i, row in enumerate(rows):
+        for j, val in enumerate(row):
+            t.cell(i, j).text = val
+    buf = io.BytesIO()
+    d.save(buf)
+    [rep] = extract_file("rubric.docx", buf.getvalue())
+    crits = draft_rubric_from_text(rep.text)
+    assert [(c.description, c.max_points, c.levels) for c in crits] == [
+        ("VM installed", 5.0, {}), ("Screenshot", 3.0, {})]
