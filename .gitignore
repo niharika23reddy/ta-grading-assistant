@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Student work and grading data must never be committed
+data/
+exports/
+*.sqlite3
