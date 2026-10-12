@@ -31,6 +31,12 @@ Rules:
   or when the work is missing.
 - Every claim that work is present must cite evidence: the passage label (e.g. "C2") and an EXACT
   quote copied from that passage. Do not paraphrase quotes.
+- Students paste screenshots into their reports. A screenshot appears in the passages as a marker
+  "[Screenshot N: OCR text of the image begins]" followed by the text read from the image, or as
+  "[Screenshot N: image present; ...]" when its text could not be read. Either marker PROVES a
+  screenshot is present at that point, next to the surrounding exercise text. OCR text from a terminal
+  screenshot shows the commands typed and their output; small recognition errors are normal.
+  Never say a screenshot is missing when a marker for it appears in the relevant exercise.
 - If the passages do not show the work, say "Missing" only if you are confident; otherwise
   "Unable to verify". Never assume content you cannot see.
 - Reference material, when given, is instructor-only context for judging correctness. It is NOT
@@ -57,25 +63,60 @@ def detect_injection(chunks: list[Chunk]) -> list[str]:
     return hits
 
 
+SCREENSHOT_WORDS_RE = re.compile(r"screen ?shots?|screen captures?|images?|figures?|pictures?", re.I)
+SCREENSHOT_MARKER_RE = re.compile(r"^\[Screenshot (\d+):", re.M)
+NOTES_QUERY_CHARS = 300
+
+
+def search_query(requirement: Requirement) -> str:
+    """The requirement plus the start of its instruction notes, which name the actual commands and tools."""
+    notes = (requirement.notes or "")[:NOTES_QUERY_CHARS]
+    return f"{requirement.description}\n{notes}".strip()
+
+
+def asks_for_screenshot(requirement: Requirement) -> bool:
+    return bool(SCREENSHOT_WORDS_RE.search(f"{requirement.description} {requirement.notes or ''}"))
+
+
+def screenshot_count(chunks: list[Chunk]) -> int:
+    """Distinct screenshots inlined by extraction, counted per file."""
+    return len({(c.file, m) for c in chunks for m in SCREENSHOT_MARKER_RE.findall(c.text)})
+
+
+def screenshot_candidates(requirement: Requirement, all_chunks: list[Chunk], limit: int = 3) -> list[Chunk]:
+    """Screenshot passages most related to the requirement, so a screenshot requirement is never
+    judged without seeing any screenshot."""
+    terms = key_terms(search_query(requirement))
+    shots = [c for c in all_chunks if c.ocr]
+    shots.sort(key=lambda c: -sum(1 for t in terms if t in c.text.lower()))
+    return shots[:limit]
+
+
 def broad_search(requirement: Requirement, all_chunks: list[Chunk], exclude: set[str], limit: int = 4) -> list[Chunk]:
-    """Keyword scan over the whole readable submission, catching what vector search missed."""
-    terms = key_terms(requirement.description)
-    if not terms:
+    """Keyword scan over the whole readable submission, catching what vector search missed.
+
+    Chunks are scored on the requirement's own words and, separately, on its instruction notes,
+    so a screenshot whose OCR text shows the instructed command is found even when it shares no
+    words with the rubric line."""
+    desc_terms = key_terms(requirement.description)
+    note_terms = [t for t in key_terms((requirement.notes or "")[:NOTES_QUERY_CHARS]) if t not in desc_terms]
+    if not desc_terms and not note_terms:
         return []
     scored = []
     for c in all_chunks:
         if c.chunk_id in exclude:
             continue
         low = c.text.lower()
-        hits = sum(1 for t in terms if t in low)
-        if hits:
-            scored.append((hits / len(terms), c))
+        score = max(sum(1 for t in desc_terms if t in low) / max(len(desc_terms), 1),
+                    sum(1 for t in note_terms if t in low) / max(len(note_terms), 1))
+        if score:
+            scored.append((score, c))
     scored.sort(key=lambda x: -x[0])
     return [c for s, c in scored[:limit] if s >= 0.25]
 
 
 def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references: list[Chunk],
-                      static_facts: str) -> str:
+                      static_facts: str, n_screenshots: int = 0) -> str:
     parts = [f"Requirement {requirement.req_id}: {requirement.description}"]
     if requirement.notes:
         parts.append(f"TA notes on this requirement: {requirement.notes}")
@@ -89,7 +130,12 @@ def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references:
         parts.append("<instructor_reference_not_student_work>\n" +
                      "\n---\n".join(r.text for r in references) +
                      "\n</instructor_reference_not_student_work>")
-    passages = "\n\n".join(f"[C{i}] ({c.location()})\n{c.text}" for i, c in enumerate(chunks, start=1))
+    if n_screenshots:
+        parts.append(f"The whole submission contains {n_screenshots} screenshot(s). Passages marked "
+                     "\"contains screenshot text\" include OCR text read from them.")
+    passages = "\n\n".join(
+        f"[C{i}] ({c.location()}{'; contains screenshot text' if c.ocr else ''})\n{c.text}"
+        for i, c in enumerate(chunks, start=1))
     parts.append(f"<student_submission>\n{passages}\n</student_submission>")
     return "\n\n".join(parts)
 
@@ -122,16 +168,19 @@ def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider
                          static_facts: str = "", top_k: int = 6, use_reference: bool = True) -> Decision:
     reasons: list[str] = []
 
-    retrieved = store.search(scope, requirement.description, k=top_k)
+    retrieved = store.search(scope, search_query(requirement), k=top_k)
     extra = broad_search(requirement, all_chunks, {c.chunk_id for c in retrieved})
     candidates = retrieved + extra
+    if asks_for_screenshot(requirement) and not any(c.ocr for c in candidates):
+        candidates += screenshot_candidates(requirement, all_chunks)
 
     references = (store.reference_chunks(scope.course, scope.assignment, requirement.description)
                   if use_reference and requirement.check_correctness else [])
 
     try:
-        raw = provider.judge(SYSTEM_PROMPT, build_user_prompt(requirement, candidates, references, static_facts),
-                             requirement, candidates)
+        n_screenshots = screenshot_count(all_chunks)
+        raw = provider.judge(SYSTEM_PROMPT, build_user_prompt(requirement, candidates, references, static_facts,
+                                                              n_screenshots), requirement, candidates)
     except Exception as exc:
         return Decision(requirement.req_id, requirement.description, "Unable to verify", "Not assessed", [],
                         f"The language model could not be used: {exc}", "", True,
@@ -163,6 +212,14 @@ def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider
             status = "Unable to verify"
             reasons.append("Part of the submission could not be read (scans, images or unsupported files); "
                            "the work may be there. Not counted as missing.")
+        elif asks_for_screenshot(requirement) and n_screenshots:
+            if not any(c.ocr for c in candidates):
+                status = "Unable to verify"
+                reasons.append(f"The submission has {n_screenshots} screenshot(s), but none were among the passages "
+                               "checked for this requirement. Not counted as missing; check the screenshots.")
+            else:
+                reasons.append(f"The submission has {n_screenshots} screenshot(s); confirm none of them shows "
+                               "this work before accepting \"Missing\".")
         if correctness != "Not assessed":
             correctness = "Not assessed"
 

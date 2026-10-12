@@ -101,6 +101,10 @@ Use anonymized codes such as `S001`.
 - **Failed retrieval is not absence.** Vector search is followed by a keyword scan of the whole
   submission. "Missing" becomes "Unable to verify" if the submission is empty or any part of it
   could not be read (scans, images, unsupported files).
+- **Screenshots stay with their exercise.** In Word files, each pasted screenshot's OCR text is
+  placed exactly where it appears, between `[Screenshot N: ...]` markers, so it shares a passage
+  with the exercise heading. Requirements that ask for a screenshot are always shown the related
+  screenshots, and "Missing" becomes "Unable to verify" if no screenshot could be checked.
 - **No penalty for extraction failure.** Unreadable pages are listed and never scored as zero.
 - **Isolation.** Student queries filter on role, course, assignment, student and version.
   Reference answers have their own role and are shown to the model as instructor-only context.
@@ -185,7 +189,8 @@ Tests use the offline mock model and hash embeddings, so they need no Ollama.
   edit the list, and link requirements to rubric criteria by hand.
 - **Rubrics in PDF/DOCX** are drafted from lines with point values. The CSV template is more reliable.
 - **OCR quality** depends on Tesseract and the scan. Handwriting is usually not readable.
-- **Images and plots** inside documents and notebooks are flagged, not interpreted.
+- **Images and plots** are read only as OCR text. Diagrams, photos and notebook plots are flagged
+  for the TA, not interpreted.
 - **Course policies** (late penalties, formatting) are not applied automatically yet.
 - **Reviews are saved per student and version** in `DATA_DIR/reviews`; TA edits on the review
   screen are kept in the session and in exports, so export before closing the browser tab.
