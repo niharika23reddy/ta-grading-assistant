@@ -1,0 +1,2 @@
+req_id,description,criterion_id,check_correctness,needs_execution,notes
+R1,<one deliverable from the official instructions>,C1,true,false,<how a TA would verify it>
