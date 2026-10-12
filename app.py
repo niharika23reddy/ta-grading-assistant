@@ -11,8 +11,8 @@ import pandas as pd
 import streamlit as st
 
 from grader import export
-from grader.checklist import (Checklist, draft_requirements, draft_rubric_from_text, find_conflicts,
-                              parse_requirements_csv, parse_rubric_csv)
+from grader.checklist import (Checklist, attach_instruction_context, draft_requirements, draft_rubric_from_text,
+                              find_conflicts, parse_requirements_csv, read_rubric_csv)
 from grader.config import get_settings
 from grader.embeddings import get_embedder
 from grader.evaluate import evaluate_submission
@@ -89,19 +89,30 @@ with tab1:
         instr_reports = read_files([(f.name, f.getvalue()) for f in instr_files
                                     if not f.name.lower().endswith(".csv")], settings.ocr_enabled)
         instr_text = "\n".join(r.text for r in instr_reports)
-        criteria, rubric_text = [], ""
+        criteria, rubric_reqs, rubric_text, rubric_total = [], [], "", None
         for f in rubric_files or []:
             if f.name.lower().endswith(".csv"):
-                criteria += parse_rubric_csv(f.getvalue().decode("utf-8", errors="replace"))
+                parsed = read_rubric_csv(f.getvalue().decode("utf-8", errors="replace"))
+                criteria += parsed.criteria
+                rubric_reqs += parsed.requirements
+                rubric_total = parsed.total if parsed.total is not None else rubric_total
             else:
                 reps = read_files([(f.name, f.getvalue())], settings.ocr_enabled)
                 rubric_text += "\n".join(r.text for r in reps)
                 instr_reports += reps
         if rubric_text:
             criteria += draft_rubric_from_text(rubric_text)
-        ss.checklist = Checklist(scope.course, scope.assignment,
-                                 csv_reqs or draft_requirements(instr_text), criteria)
-        ss.instr_text, ss.rubric_text = instr_text, rubric_text
+        if csv_reqs:
+            reqs = csv_reqs
+        elif rubric_reqs:
+            # The rubric's level descriptions name the deliverables and are already linked to
+            # criteria; the instructions supply the exact commands and questions as notes.
+            reqs = rubric_reqs
+            attach_instruction_context(reqs, criteria, instr_text)
+        else:
+            reqs = draft_requirements(instr_text)
+        ss.checklist = Checklist(scope.course, scope.assignment, reqs, criteria)
+        ss.instr_text, ss.rubric_text, ss.rubric_total = instr_text, rubric_text, rubric_total
         ss.setup_warnings = unreadable_parts(instr_reports)
         if ref_files:
             _, n = ingest_reference(get_store(), scope.course, scope.assignment,
@@ -126,10 +137,11 @@ with tab1:
                    "Points are never invented.")
         crit_rows = [{"criterion_id": c.criterion_id, "description": c.description, "max_points": c.max_points,
                       "full_points": c.levels.get("full"), "partial_points": c.levels.get("partial"),
-                      "none_points": c.levels.get("none")} for c in cl.criteria]
+                      "none_points": c.levels.get("none"), "notes": c.notes} for c in cl.criteria]
         crit_df = st.data_editor(
             pd.DataFrame(crit_rows or [{"criterion_id": "C1", "description": "", "max_points": 0.0,
-                                        "full_points": None, "partial_points": None, "none_points": None}]),
+                                        "full_points": None, "partial_points": None, "none_points": None,
+                                        "notes": ""}]),
             num_rows="dynamic", use_container_width=True, key="crit_editor")
 
         def from_editors() -> Checklist:
@@ -144,11 +156,12 @@ with tab1:
                 levels = {k: float(r[f"{k}_points"]) for k in ("full", "partial", "none")
                           if r.get(f"{k}_points") is not None and not pd.isna(r.get(f"{k}_points"))}
                 crits.append(Criterion(str(r["criterion_id"]).strip(), str(r["description"] or ""),
-                                       float(r["max_points"] or 0), levels))
+                                       float(r["max_points"] or 0), levels, str(r.get("notes") or "")))
             return Checklist(scope.course, scope.assignment, reqs, crits, False)
 
         current = from_editors()
-        conflicts = find_conflicts(current, ss.get("instr_text", ""), ss.get("rubric_text", ""))
+        conflicts = find_conflicts(current, ss.get("instr_text", ""), ss.get("rubric_text", ""),
+                                   ss.get("rubric_total"))
         if conflicts:
             st.subheader("Check these before approving")
             for c in conflicts:
