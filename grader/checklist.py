@@ -95,7 +95,119 @@ def parse_requirements_csv(text: str) -> list[Requirement]:
     return out
 
 
+@dataclass
+class RubricCSV:
+    criteria: list[Criterion]
+    requirements: list[Requirement]  # drafted from level descriptions, already linked
+    total: float | None  # total stated in a "Total" row, if any
+
+
 def parse_rubric_csv(text: str) -> list[Criterion]:
+    return read_rubric_csv(text).criteria
+
+
+def read_rubric_csv(text: str) -> RubricCSV:
+    """Read either the app's rubric template or a level-based rubric export
+    (columns like Criteria, Expected, Expected Pts, Satisfactory, Satisfactory Pts, ..., Max Pts)."""
+    rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+    if not rows:
+        return RubricCSV([], [], None)
+    headers = [h.strip().lower() for h in rows[0]]
+    if "criterion_id" in headers:
+        return RubricCSV(_parse_template_rubric(text), [], None)
+    return _parse_level_rubric(rows)
+
+
+def _num(val: str) -> float | None:
+    m = re.fullmatch(r"\s*\(?(-?\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)?\)?\s*", val or "", re.I)
+    return float(m.group(1)) if m else None
+
+
+PTS_HEADER = re.compile(r"\b(pts?|points?|marks?)\b", re.I)
+NUMBERED_ITEM = re.compile(r"(?:^|\s)\d+[.)]\s+")
+PER_ITEM_RULE = re.compile(r"\b(each|per)\b", re.I)
+
+
+def _parse_level_rubric(rows: list[list[str]]) -> RubricCSV:
+    raw = [h.strip() for h in rows[0]]
+    low = [h.lower() for h in raw]
+    max_col = next((i for i, h in enumerate(low) if "max" in h or h == "total"), None)
+    level_cols = [i for i, h in enumerate(low) if PTS_HEADER.search(h) and i != max_col and i > 0]
+    levels_meta = []  # (name, text column or None, points column)
+    for i in level_cols:
+        text_col = i - 1 if i - 1 > 0 and i - 1 not in level_cols and i - 1 != max_col else None
+        name = raw[text_col] if text_col is not None else PTS_HEADER.sub("", raw[i]).strip()
+        levels_meta.append((name or f"Level {len(levels_meta) + 1}", text_col, i))
+
+    criteria, reqs, total = [], [], None
+    for row in rows[1:]:
+        row = row + [""] * (len(raw) - len(row))
+        name = row[0].strip()
+        if not name:
+            continue
+        if re.fullmatch(r"(grand )?total\b.*", name, re.I):
+            vals = [_num(v) for v in row[1:]]
+            total = next((v for v in reversed(vals) if v is not None), None)
+            continue
+        pts = [(n, row[t].strip() if t is not None else "", _num(row[p])) for n, t, p in levels_meta]
+        pts = [x for x in pts if x[2] is not None]
+        max_pts = _num(row[max_col]) if max_col is not None else None
+        if max_pts is None and pts:
+            max_pts = max(p for _, _, p in pts)
+        if max_pts is None:
+            continue
+        cid = f"C{len(criteria) + 1}"
+        levels, notes = {}, []
+        if pts:
+            levels["full"] = pts[0][2]
+        if len(pts) >= 2:
+            levels["none"] = pts[-1][2]
+        middles = pts[1:-1]
+        if middles:
+            levels["partial"] = middles[0][2]
+            for lname, ltext, lpts in middles:
+                notes.append(f"{lname} ({lpts:g} pts): {ltext}".strip())
+            if len(middles) > 1:
+                notes.append(f"Rubric has {len(middles)} partial levels; the app suggests the first. "
+                             "Choose the right one when approving points.")
+        expected = pts[0][1] if pts else ""
+        criteria.append(Criterion(cid, name, max_pts, levels, " | ".join(notes)))
+        items = [x.strip(" .;") for x in NUMBERED_ITEM.split(expected) if x.strip(" .;")] or (
+            [expected.strip()] if expected.strip() else [])
+        for item in items:
+            reqs.append(Requirement(f"R{len(reqs) + 1}", f"{name}: {item}", cid))
+    return RubricCSV(criteria, reqs, total)
+
+
+def attach_instruction_context(reqs: list[Requirement], criteria: list[Criterion], instructions: str,
+                               limit: int = 700) -> None:
+    """Copy the part of the instructions that belongs to each criterion (e.g. the "Lab Exercise 2"
+    section) into its requirements' notes, so the reviewer knows the exact command or question."""
+    if not instructions.strip():
+        return
+    starts = {}
+    for c in criteria:
+        m = re.search(re.escape(c.description), instructions, re.I)
+        if not m:
+            num = re.search(r"(\d+)\s*$", c.description)
+            word = re.sub(r"\s*\d+\s*$", "", c.description).split()[-1:] if num else []
+            if num and word:
+                m = re.search(rf"\b{re.escape(word[0])}\s*#?\s*{num.group(1)}\b", instructions, re.I)
+        if m:
+            starts[c.criterion_id] = m.start()
+    ordered = sorted(starts.items(), key=lambda kv: kv[1])
+    sections = {}
+    for i, (cid, pos) in enumerate(ordered):
+        end = ordered[i + 1][1] if i + 1 < len(ordered) else len(instructions)
+        sections[cid] = re.sub(r"\n{2,}", "\n", instructions[pos:end]).strip()
+    for r in reqs:
+        sec = sections.get(r.criterion_id)
+        if sec and not r.notes:
+            clipped = sec if len(sec) <= limit else sec[:limit].rsplit(" ", 1)[0] + " ..."
+            r.notes = "From the instructions: " + clipped
+
+
+def _parse_template_rubric(text: str) -> list[Criterion]:
     """Parse the structured rubric template (templates/rubric_template.csv)."""
     out = []
     for row in csv.DictReader(io.StringIO(text)):
@@ -165,7 +277,8 @@ def stated_total(text: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def find_conflicts(checklist: Checklist, instructions_text: str = "", rubric_text: str = "") -> list[str]:
+def find_conflicts(checklist: Checklist, instructions_text: str = "", rubric_text: str = "",
+                   rubric_total: float | None = None) -> list[str]:
     """Inconsistencies the TA should resolve before grading."""
     issues = []
     crit_ids = {c.criterion_id for c in checklist.criteria}
@@ -184,6 +297,9 @@ def find_conflicts(checklist: Checklist, instructions_text: str = "", rubric_tex
             issues.append(f"Rubric criterion {c.criterion_id} ({c.description}) has no matching requirement in the instructions.")
         if "partial" not in c.levels:
             issues.append(f"{c.criterion_id} has no partial-credit rule; partial work will be left for the TA.")
+        elif PER_ITEM_RULE.search(c.notes or ""):
+            issues.append(f"{c.criterion_id} ({c.description}) describes a per-item partial-credit rule "
+                          f"that differs from its fixed partial points; partial scores there stay provisional.")
         for lvl, pts in c.levels.items():
             if pts > c.max_points or pts < 0:
                 issues.append(f"{c.criterion_id} level '{lvl}' gives {pts} points, outside 0-{c.max_points}.")
@@ -192,4 +308,6 @@ def find_conflicts(checklist: Checklist, instructions_text: str = "", rubric_tex
         total = stated_total(text) if text else None
         if total is not None and checklist.criteria and abs(total - rubric_sum) > 1e-9:
             issues.append(f"The {label} state a total of {total:g} points, but rubric criteria add up to {rubric_sum:g}.")
+    if rubric_total is not None and checklist.criteria and abs(rubric_total - rubric_sum) > 1e-9:
+        issues.append(f"The rubric's Total row says {rubric_total:g} points, but criteria add up to {rubric_sum:g}.")
     return issues

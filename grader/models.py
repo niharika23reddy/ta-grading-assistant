@@ -101,6 +101,8 @@ class Criterion:
     # Points per performance level, only as given in the official rubric.
     # Keys: "full", "partial", "none". Missing "partial" means no partial-credit rule.
     levels: dict = field(default_factory=dict)
+    # Level wording copied from the rubric, e.g. partial-credit conditions.
+    notes: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -12,7 +12,7 @@ def chunk_reports(reports: list[ExtractionReport], prefix: str, chunk_chars: int
     for report in reports:
         for page in report.pages:
             if page.text.strip():
-                chunks.extend(_chunk_page(page.text, report.file, page.page, prefix, chunk_chars, overlap,
+                chunks.extend(_chunk_page(page.text, page.file or report.file, page.page, prefix, chunk_chars, overlap,
                                           page.method == "ocr"))
     return chunks
 

@@ -91,8 +91,21 @@ def _render_pdf_page(data: bytes, index: int):
         return None
 
 
-def extract_docx(name: str, data: bytes) -> ExtractionReport:
+def _docx_images(document) -> list[bytes]:
+    """Embedded pictures in document order (screenshots pasted into the report)."""
+    blobs = []
+    for shape in document.inline_shapes:
+        try:
+            rid = shape._inline.graphic.graphicData.pic.blipFill.blip.embed
+            blobs.append(document.part.related_parts[rid].blob)
+        except Exception:
+            blobs.append(b"")
+    return blobs
+
+
+def extract_docx(name: str, data: bytes, ocr: bool = True) -> ExtractionReport:
     import docx
+    from PIL import Image
 
     try:
         document = docx.Document(io.BytesIO(data))
@@ -108,12 +121,25 @@ def extract_docx(name: str, data: bytes) -> ExtractionReport:
     for table in document.tables:
         for row in table.rows:
             lines.append(" | ".join(cell.text.strip() for cell in row.cells))
-    warnings = []
-    n_images = len(document.inline_shapes)
-    if n_images:
-        warnings.append(f"Document contains {n_images} image(s) (screenshots, figures) that were not read. TA must check them.")
     text = "\n".join(lines).strip()
-    return _report(name, "docx", [PageText(name, None, text, "text", warnings)])
+    pages = [PageText(name, None, text, "text", [])]
+
+    images = _docx_images(document)
+    if images and not (ocr and ocr_available()):
+        why = "OCR is off" if not ocr else "Tesseract is not installed"
+        pages[0].warnings.append(f"Document contains {len(images)} image(s) (screenshots, figures) that were not "
+                                 f"read because {why}. TA must check them.")
+    elif images:
+        for k, blob in enumerate(images, start=1):
+            label = f"{name} (image {k})"
+            try:
+                img = Image.open(io.BytesIO(blob))
+                img.load()
+            except Exception:
+                pages.append(PageText(label, None, "", "none", ["Image format could not be opened. TA must check it."]))
+                continue
+            pages.append(_ocr_page(label, None, img, ocr))
+    return _report(name, "docx", pages)
 
 
 def extract_text(name: str, data: bytes) -> ExtractionReport:
@@ -185,7 +211,7 @@ def extract_file(name: str, data: bytes, ocr: bool = True) -> list[ExtractionRep
     if ext == ".pdf":
         return [extract_pdf(name, data, ocr)]
     if ext == ".docx":
-        return [extract_docx(name, data)]
+        return [extract_docx(name, data, ocr)]
     if ext == ".ipynb":
         return [extract_ipynb(name, data)]
     if ext in IMAGE_EXTS:
@@ -211,7 +237,7 @@ def unreadable_parts(reports: list[ExtractionReport]) -> list[str]:
         for w in r.warnings:
             out.append(f"{r.file}: {w}")
         for p in r.pages:
-            where = r.file if p.page is None else f"{r.file} page {p.page}"
+            where = p.file if p.page is None else f"{p.file} page {p.page}"
             for w in p.warnings:
                 out.append(f"{where}: {w}")
     return out

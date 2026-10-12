@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from .checklist import PER_ITEM_RULE
 from .models import Criterion, Decision, Requirement
 
 
@@ -95,6 +96,9 @@ def score(criteria: list[Criterion], requirements: list[Requirement], decisions:
             pts = c.levels.get("none", 0.0)
         elif level == "partial" and "partial" in c.levels:
             pts = c.levels["partial"]
+            if PER_ITEM_RULE.search(c.notes or ""):
+                provisional = True
+                notes.append("Rubric describes a per-item rule for partial credit; check these points.")
         elif level == "partial":
             pts, provisional = None, True
             notes.append("Rubric gives no partial-credit rule; TA must decide the points.")
