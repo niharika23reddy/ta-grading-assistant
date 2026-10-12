@@ -38,6 +38,16 @@ def test_unable_to_verify_is_unresolved_not_zero():
     assert s.suggested_total == 3.5
 
 
+def test_unable_to_verify_can_be_counted_as_missing():
+    decisions = [dec("R1", "Met"), dec("R2", "Unable to verify"), dec("R3", "Missing"), dec("R4", "Met")]
+    s = score(CRITS, REQS, decisions, unverified_as_missing=True)
+    c1 = s.criteria[0]
+    # R1 met, R2 counted as missing: partial credit by the rubric, flagged for the TA
+    assert c1.level == "partial" and c1.suggested_points is not None and c1.provisional
+    assert any("counted as missing" in n for n in c1.notes)
+    assert s.complete
+
+
 def test_incorrect_work_is_partial_and_not_assessed_is_provisional():
     s = score(CRITS, REQS, [dec("R1", "Met", "Incorrect"), dec("R2", "Met"), dec("R3", "Met", "Not assessed"),
                             dec("R4", "Met")])

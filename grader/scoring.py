@@ -3,7 +3,9 @@
 Points come only from the rubric: a criterion's max points (full credit), its
 stated "none" level (default 0) and its stated "partial" level. When the rubric
 has no partial-credit rule, partial work gets no suggested points and is left
-to the TA. Unverifiable criteria are left unresolved rather than scored zero.
+to the TA. Unverifiable criteria are left unresolved rather than scored zero,
+unless the TA turns on "unverified counts as missing", in which case they are
+scored like missing work and marked provisional so the TA checks them.
 """
 from __future__ import annotations
 
@@ -42,9 +44,12 @@ class ScoreSummary:
         return d
 
 
-def requirement_level(decision: Decision, requirement: Requirement) -> tuple[str, bool, str]:
+def requirement_level(decision: Decision, requirement: Requirement,
+                      unverified_as_missing: bool = False) -> tuple[str, bool, str]:
     """Map a decision to a rubric level. Returns (level, provisional, note)."""
     if decision.status == "Unable to verify":
+        if unverified_as_missing:
+            return "none", True, f"{decision.req_id} could not be found, so it was counted as missing; check it."
         return "unresolved", False, f"{decision.req_id} could not be verified."
     if decision.status == "Missing":
         return "none", False, ""
@@ -58,7 +63,8 @@ def requirement_level(decision: Decision, requirement: Requirement) -> tuple[str
     return "full", False, ""
 
 
-def score(criteria: list[Criterion], requirements: list[Requirement], decisions: list[Decision]) -> ScoreSummary:
+def score(criteria: list[Criterion], requirements: list[Requirement], decisions: list[Decision],
+          unverified_as_missing: bool = False) -> ScoreSummary:
     by_req = {d.req_id: d for d in decisions}
     results = []
     for c in criteria:
@@ -75,7 +81,7 @@ def score(criteria: list[Criterion], requirements: list[Requirement], decisions:
                 levels.append("unresolved")
                 notes.append(f"{r.req_id} has not been evaluated.")
                 continue
-            lvl, prov, note = requirement_level(d, r)
+            lvl, prov, note = requirement_level(d, r, unverified_as_missing)
             levels.append(lvl)
             provisional |= prov
             if note:

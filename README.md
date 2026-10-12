@@ -55,6 +55,7 @@ committed. The defaults need **no API keys**.
 | `DATA_DIR` | `./data` | Where the vector database, checklists and reviews are stored |
 | `OCR_ENABLED` | `true` | Read scanned pages and screenshots with Tesseract |
 | `TOP_K`, `CHUNK_CHARS`, `CHUNK_OVERLAP` | 6, 900, 150 | Retrieval and chunking sizes |
+| `UNVERIFIED_AS_MISSING` | `true` | Deduct points for "Unable to verify" items as if missing (marked provisional). Also a checkbox on the review tab |
 
 If you ever add a cloud provider, put its key in `.env` only. Never paste keys into chat or code.
 

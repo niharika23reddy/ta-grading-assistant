@@ -296,13 +296,17 @@ with tab3:
         ss.ta_rows = ta_rows
 
         st.subheader("Scores")
-        suggested = score(cl.criteria, cl.requirements, ss.decisions)
+        as_missing = st.checkbox(
+            "Deduct points for work that could not be found", value=settings.unverified_as_missing,
+            help="On: items marked \"Unable to verify\" are scored like \"Missing\" and flagged provisional. "
+                 "Off: they stay unresolved until you decide.")
+        suggested = score(cl.criteria, cl.requirements, ss.decisions, as_missing)
         ss.suggested = suggested
         st.caption("Suggested points come from the model's findings and the rubric only. "
                    "Approved points are yours and are kept separate.")
         ta_decisions = [Decision(r["req_id"], "", r["status"], r["correctness"], [], "", "", False)
                         for r in ta_rows]
-        ta_based = score(cl.criteria, cl.requirements, ta_decisions)
+        ta_based = score(cl.criteria, cl.requirements, ta_decisions, as_missing)
         approved = {}
         for cs, tb in zip(suggested.criteria, ta_based.criteria):
             c1, c2, c3 = st.columns([3, 2, 2])
