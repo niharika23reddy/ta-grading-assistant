@@ -98,7 +98,13 @@ def extract_docx(name: str, data: bytes) -> ExtractionReport:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:
         return ExtractionReport(name, "docx", [], False, [f"DOCX could not be opened: {exc}"])
-    lines = [p.text for p in document.paragraphs]
+    lines = []
+    for para in document.paragraphs:
+        # Word's automatic numbering and bullets are not part of the paragraph text,
+        # so mark list items explicitly; checklist drafting relies on them.
+        style = (para.style.name if para.style is not None else "") or ""
+        is_list = style.lower().startswith("list") or para._p.pPr is not None and para._p.pPr.numPr is not None
+        lines.append(f"- {para.text}" if is_list and para.text.strip() else para.text)
     for table in document.tables:
         for row in table.rows:
             lines.append(" | ".join(cell.text.strip() for cell in row.cells))

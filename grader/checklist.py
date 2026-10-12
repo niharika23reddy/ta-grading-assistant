@@ -17,7 +17,17 @@ from .models import Criterion, Requirement
 REQ_LINE = re.compile(r"^\s*(?:[-*•]|\(?\d+[.)]|\(?[a-z][.)])\s+(.*\S)\s*$", re.I)
 REQ_WORDS = re.compile(r"\b(must|should|include|includes|submit|provide|implement|write|explain|"
                        r"describe|discuss|compare|report|plot|create|use|cite|analy[sz]e|calculate|"
-                       r"answer|define|design|test|document)\b", re.I)
+                       r"answer|define|design|test|document|install|configure|set up|setup|take|"
+                       r"screenshot|capture|run|open|download|upload|save|record|verify|connect|"
+                       r"enable|launch|add|attach|paste|show|list|identify|complete|required)\b", re.I)
+# Plain sentences (not list items) count only when they read as an instruction.
+IMPERATIVE_START = re.compile(r"^\s*(please\s+)?(install|configure|set up|setup|take|capture|run|open|"
+                              r"download|upload|save|record|verify|connect|enable|launch|add|attach|paste|"
+                              r"create|write|explain|describe|discuss|compare|submit|provide|implement|"
+                              r"include|plot|use|cite|analy[sz]e|calculate|answer|define|design|test|"
+                              r"document|list|identify|complete|show|make|ensure|log in|sign in|navigate|"
+                              r"click|select|go to|start|restart|update|check)\b", re.I)
+OBLIGATION = re.compile(r"\b(you must|you should|you need to|students must|is required|are required)\b", re.I)
 POINTS_RE = re.compile(r"\(?\b(\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)\b\)?", re.I)
 TOTAL_RE = re.compile(r"(?:out of|total(?: of)?|worth)\s+(\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)", re.I)
 EXEC_WORDS = re.compile(r"\b(runs?|executes?|output|passes|tests? pass|compiles?|runtime|performance)\b", re.I)
@@ -51,14 +61,21 @@ class Checklist:
 
 def draft_requirements(instructions: str) -> list[Requirement]:
     """List-item lines that read like a deliverable become draft requirements."""
-    reqs = []
+    reqs, seen = [], set()
     for line in instructions.splitlines():
         m = REQ_LINE.match(line)
-        if not m:
+        if m:
+            text = m.group(1)
+            if not REQ_WORDS.search(text):
+                continue
+        elif IMPERATIVE_START.match(line) or OBLIGATION.search(line):
+            text = line
+        else:
             continue
-        text = POINTS_RE.sub("", m.group(1)).strip(" -:;")
-        if len(text) < 8 or not REQ_WORDS.search(text):
+        text = POINTS_RE.sub("", text).strip(" -:;\t")
+        if len(text) < 8 or "|" in text or text.lower() in seen:
             continue
+        seen.add(text.lower())
         reqs.append(Requirement(req_id=f"R{len(reqs) + 1}", description=text,
                                 needs_execution=bool(EXEC_WORDS.search(text))))
     return reqs
@@ -99,6 +116,11 @@ def draft_rubric_from_text(text: str) -> list[Criterion]:
     """Lines that state a point value become draft criteria. Partial credit is left blank."""
     out = []
     for line in text.splitlines():
+        if "|" in line:
+            crit = _criterion_from_table_row(line, len(out) + 1)
+            if crit:
+                out.append(crit)
+            continue
         m = POINTS_RE.search(line)
         if not m or TOTAL_RE.search(line):
             continue
@@ -108,6 +130,34 @@ def draft_rubric_from_text(text: str) -> list[Criterion]:
             continue
         out.append(Criterion(f"C{len(out) + 1}", desc, float(m.group(1)), {}))
     return out
+
+
+NUMBER_CELL = re.compile(r"^\(?(\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)?\)?$", re.I)
+RANGE_CELL = re.compile(r"^\d+(?:\.\d+)?\s*[-\u2013]\s*(\d+(?:\.\d+)?)\s*(?:points?|pts?|marks?)?$", re.I)
+
+
+def _criterion_from_table_row(line: str, index: int) -> Criterion | None:
+    """A rubric table row: the first text cell is the criterion, the largest number is its max points.
+    Level columns (e.g. Excellent 5 / Partial 3 / Missing 0) are not mapped automatically; the TA
+    fills partial credit from the official rubric."""
+    cells = [c.strip() for c in line.split("|") if c.strip()]
+    texts, numbers = [], []
+    for c in cells:
+        m = NUMBER_CELL.match(c) or RANGE_CELL.match(c)
+        if m:
+            numbers.append(float(m.group(1)))
+        else:
+            pm = POINTS_RE.search(c)
+            if pm and len(c) < 25:
+                numbers.append(float(pm.group(1)))
+            else:
+                texts.append(c)
+    if not texts or not numbers:
+        return None
+    desc = texts[0]
+    if re.fullmatch(r"(total|grand total|sum)\b.*", desc, re.I):
+        return None
+    return Criterion(f"C{index}", desc, max(numbers), {})
 
 
 def stated_total(text: str) -> float | None:

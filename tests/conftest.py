@@ -30,7 +30,10 @@ def store(tmp_path):
 @pytest.fixture
 def sample_checklist():
     reqs = draft_requirements((SAMPLES / "assignment/instructions.md").read_text())
-    for r in reqs:
+    # As a TA would in the app: drop the file-format line (no rubric criterion) and renumber.
+    reqs = [r for r in reqs if not r.description.startswith("Submit")]
+    for i, r in enumerate(reqs, start=1):
+        r.req_id = f"R{i}"
         r.criterion_id = SAMPLE_LINKS[r.req_id]
     crits = parse_rubric_csv((SAMPLES / "assignment/rubric.csv").read_text())
     return Checklist("DATA101", "A1", reqs, crits, approved=True)
