@@ -316,3 +316,30 @@ def test_screenshot_showing_the_command_is_never_missing(store, settings):
     assert d.status == "Unable to verify" and d.ta_review
     assert any('shows "aescrypt -h"' in r for r in d.review_reasons)
     assert any(e.verified and "page 8" in e.location for e in d.evidence)
+
+
+@needs_ocr
+def test_small_dark_terminal_in_desktop_screenshot_is_read():
+    """A whole VM desktop pasted into a PDF page: the terminal text is tiny once the page is rendered,
+    so the picture must be OCR'd at its own resolution."""
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    try:
+        font = ImageFont.truetype("DejaVuSansMono.ttf", 14)
+    except OSError:
+        font = ImageFont.load_default(size=14)
+    desktop = Image.new("RGB", (1920, 1080), (60, 60, 60))
+    draw = ImageDraw.Draw(desktop)
+    draw.rectangle((300, 200, 1300, 700), fill=(48, 10, 36))  # dark terminal window
+    for n, line in enumerate(["student@ubuntu:~$ aescrypt -h",
+                              "usage: aescrypt {-e|-d} [ -p password ] [-o <output>] <file>"]):
+        draw.text((310, 210 + n * 20), line, fill=(230, 230, 230), font=font)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    c.drawString(50, 800, "Lab Exercise 1")
+    c.showPage()
+    c.drawImage(ImageReader(desktop), 20, 300, 555, 312)
+    c.save()
+    [rep] = extract_file("lab.pdf", buf.getvalue(), ocr=True)
+    assert "aescrypt -h" in rep.pages[1].text

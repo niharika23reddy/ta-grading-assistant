@@ -37,7 +37,21 @@ def ocr_available() -> bool:
 def _ocr_image(img) -> str:
     import pytesseract
 
-    return pytesseract.image_to_string(img)
+    return pytesseract.image_to_string(_prepare_for_ocr(img))
+
+
+def _prepare_for_ocr(img):
+    """Tesseract reads dark text on a light background best, at a decent size. Terminal
+    screenshots are often light text on a dark background, and small once pasted."""
+    from PIL import Image, ImageOps
+
+    gray = ImageOps.grayscale(img.convert("RGB"))
+    hist = gray.histogram()
+    if sum(hist[:128]) > sum(hist[128:]):  # mostly dark: invert
+        gray = ImageOps.invert(gray)
+    if gray.width < 1200:
+        gray = gray.resize((gray.width * 2, gray.height * 2), Image.LANCZOS)
+    return gray
 
 
 def _ocr_page(name: str, page_no: int | None, img, ocr: bool) -> PageText:
@@ -56,6 +70,7 @@ def _ocr_page(name: str, page_no: int | None, img, ocr: bool) -> PageText:
 
 
 MIN_IMAGE_PT = 40  # smaller pictures (bullets, icons, logos) are ignored
+OCR_RENDER_SCALE = 3  # about 216 dpi when a page has to be rendered for OCR
 
 
 def extract_pdf(name: str, data: bytes, ocr: bool) -> ExtractionReport:
@@ -64,33 +79,40 @@ def extract_pdf(name: str, data: bytes, ocr: bool) -> ExtractionReport:
     pages: list[PageText] = []
     k = 0  # screenshot number across the whole file
     prev_line = ""  # last line of readable text before the current page
+    use_ocr = ocr and ocr_available()
     try:
+        doc = _open_pdfium(data)
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for i, page in enumerate(pdf.pages, start=1):
                 text = (page.extract_text() or "").strip()
-                images = sorted((im for im in page.images
-                                 if im["x1"] - im["x0"] >= MIN_IMAGE_PT and im["bottom"] - im["top"] >= MIN_IMAGE_PT),
-                                key=lambda im: im["top"])
+                images = _pdf_images(doc, i - 1, float(page.height))
                 if len(text) >= MIN_PAGE_CHARS and not images:
                     pages.append(PageText(name, i, text, "text", []))
                     prev_line = _last_text_line(text)
                     continue
-                rendered = _render_pdf_page(data, i - 1) if ocr and ocr_available() else None
                 outcomes: dict[str, list[int]] = {"read": [], "little": [], "unread": []}
                 if len(text) < MIN_PAGE_CHARS:
-                    # the whole page is a picture: a scan, or a screenshot saved as its own page
-                    k += 1
-                    shot, outcome = _ocr_screenshot(k, rendered, ocr)
-                    outcomes[outcome].append(k)
+                    # the whole page is pictures: a scan, or screenshots saved as their own page.
+                    # Tie them to the exercise text they follow on the previous page.
+                    lines = [f"[Screenshot {k + 1} follows: {prev_line[:100]}]"] if prev_line and not text else []
+                    lines += [text] if text else []
+                    for im in images or [None]:
+                        k += 1
+                        if not use_ocr:
+                            picture = None
+                        elif im is None:  # no embedded picture (vector page): OCR the rendered page
+                            picture = _render_pdf_page(data, i - 1, OCR_RENDER_SCALE)
+                        else:
+                            picture = im["image"]()
+                        shot, outcome = _ocr_screenshot(k, picture, ocr)
+                        lines += shot
+                        outcomes[outcome].append(k)
                     warns = ["Page has little or no selectable text (likely scanned or a screenshot)."]
-                    # tie the picture to the exercise it follows on the previous page
-                    context = [f"[Screenshot {k} follows: {prev_line[:100]}]"] if prev_line and not text else []
-                    body = "\n".join(([text] if text else []) + context + shot)
-                    pages.append(PageText(name, i, body, "none" if outcome == "unread" else "ocr",
-                                          warns + _image_warnings(outcomes, ocr)))
+                    method = "none" if not outcomes["read"] and not outcomes["little"] else "ocr"
+                    pages.append(PageText(name, i, "\n".join(lines), method, warns + _image_warnings(outcomes, ocr)))
                     prev_line = _last_text_line(text) or prev_line
                     continue
-                lines, k = _pdf_page_with_images(page, images, rendered, ocr, k, outcomes)
+                lines, k = _pdf_page_with_images(page, images, use_ocr, ocr, k, outcomes)
                 pages.append(PageText(name, i, "\n".join(lines), "text+ocr", _image_warnings(outcomes, ocr)))
                 prev_line = _last_text_line(text)
     except Exception as exc:  # corrupt or encrypted PDFs
@@ -98,19 +120,58 @@ def extract_pdf(name: str, data: bytes, ocr: bool) -> ExtractionReport:
     return _report(name, "pdf", pages)
 
 
-def _pdf_page_with_images(page, images, rendered, ocr: bool, k: int, outcomes: dict[str, list[int]]):
+def _open_pdfium(data: bytes):
+    try:
+        import pypdfium2 as pdfium
+
+        return pdfium.PdfDocument(data)
+    except Exception:
+        return None
+
+
+def _pdf_images(doc, index: int, page_height: float) -> list[dict]:
+    """Pictures on one page, top to bottom, each with a loader for its original pixels.
+
+    Reading the embedded picture at its own resolution OCRs far better than a rendered
+    page, where a pasted desktop screenshot's terminal text shrinks to a few pixels."""
+    if doc is None:
+        return []
+    try:
+        import pypdfium2.raw as pdfium_c
+
+        objects = list(doc[index].get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE], max_depth=5))
+    except Exception:
+        return []
+    out = []
+    for obj in objects:
+        try:
+            left, bottom, right, top = obj.get_bounds()
+        except Exception:
+            continue
+        if right - left < MIN_IMAGE_PT or top - bottom < MIN_IMAGE_PT:
+            continue
+        out.append({"x0": left, "x1": right, "top": page_height - top, "bottom": page_height - bottom,
+                    "image": lambda obj=obj: _pdf_image_pixels(obj)})
+    return sorted(out, key=lambda im: im["top"])
+
+
+def _pdf_image_pixels(obj):
+    for render in (False, True):  # raw pixels first; rendered applies masks and odd colour spaces
+        try:
+            return obj.get_bitmap(render=render).to_pil()
+        except Exception:
+            continue
+    return None
+
+
+def _pdf_page_with_images(page, images, use_ocr: bool, ocr: bool, k: int, outcomes: dict[str, list[int]]):
     """Text and pictures in reading order: the text above each picture, then the picture's OCR text."""
     lines: list[str] = []
-    scale = rendered.width / float(page.width) if rendered is not None else 1.0
     top = 0.0
     for im in images:
         lines.append(_crop_text(page, top, im["top"]))
         k += 1
-        crop = None
-        if rendered is not None:
-            box = (max(0, im["x0"]), max(0, im["top"]), min(page.width, im["x1"]), min(page.height, im["bottom"]))
-            crop = rendered.crop(tuple(int(v * scale) for v in box))
-        shot, outcome = _ocr_screenshot(k, crop, ocr)
+        shot, outcome = _ocr_screenshot(k, im["image"]() if use_ocr else None, ocr)
         lines.extend(shot)
         outcomes[outcome].append(k)
         top = max(top, im["bottom"])
@@ -133,12 +194,12 @@ def _crop_text(page, top: float, bottom: float) -> str:
         return ""
 
 
-def _render_pdf_page(data: bytes, index: int):
+def _render_pdf_page(data: bytes, index: int, scale: float = 2):
     try:
         import pypdfium2 as pdfium
 
         doc = pdfium.PdfDocument(data)
-        return doc[index].render(scale=2).to_pil()
+        return doc[index].render(scale=scale).to_pil()
     except Exception:
         return None
 
