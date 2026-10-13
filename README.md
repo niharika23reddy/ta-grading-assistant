@@ -200,6 +200,10 @@ Tests use the offline mock model and hash embeddings, so they need no Ollama.
 Every requirement is one call to the local model, so a student with 19 requirements makes 19 calls.
 To make grading faster:
 
+- **Short submissions are read once** (`WHOLE_SUBMISSION_CHARS=12000`). A submission up to that
+  size is sent whole, with the same opening for every requirement, so the model reuses what it
+  already read and only processes the new question. This is the biggest saving. Longer
+  submissions are searched per requirement as before.
 - **Judge two requirements at once** (on by default, `LLM_PARALLEL=2`). Ollama must allow it too.
   Run this once in Terminal, then quit and reopen the Ollama app:
   `launchctl setenv OLLAMA_NUM_PARALLEL 2`

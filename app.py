@@ -257,6 +257,7 @@ with tab3:
             cl.requirements, scope, get_store(), provider, unread_content=unread,
             static_facts=summary_text(analyze(ss.reports)) if ss.get("indexed_scope") == scope else "",
             top_k=settings.top_k, parallel=settings.llm_parallel,
+            whole_chars=settings.whole_submission_chars,
             progress=lambda i, n, r: bar.progress(i / n, text=f"Checked {i} of {n} requirements..."))
         bar.progress(1.0, text="Done")
         ss.decisions, ss.injection_hits = decisions, hits
