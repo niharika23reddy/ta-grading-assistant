@@ -1,6 +1,7 @@
 # TA Grading Assistant
 
-A local app that helps a teaching assistant review **one assignment and one student at a time**.
+A local app that helps a teaching assistant review **one assignment at a time**, one student or a whole
+class (tab 5).
 You upload the instructions and rubric, confirm the grading checklist, upload a student's files,
 and the app checks every requirement, cites evidence with its location, suggests rubric-based
 scores and drafts feedback. You review and approve everything.
@@ -90,6 +91,17 @@ Use anonymized codes such as `S001`.
    reasoning, an improvement suggestion and why TA review is needed. Set your own status,
    correctness and comment, then enter **approved points** per criterion. Edit the draft feedback.
 4. **Export.** Download JSON, a requirements CSV and a scores CSV.
+5. **Many students.** Grade a whole class in one run. Choose how the files are named:
+   - one file (or ZIP) per student, named with the student code (`S001.pdf`);
+   - file names that start with the student code and an underscore (`S001_report.pdf`, `S001_code.py`);
+   - one class ZIP with a folder per student (`S001/report.pdf`, `S002/...`).
+
+   The table shows which files belong to which student before anything runs. **Grade N students**
+   reads, indexes and reviews each student separately, under their own code, and saves the review.
+   "Skip students who are already graded" lets you continue after a stop. With a local model each
+   student takes several minutes, so keep the computer awake and the page open. The summary lists
+   each student's suggested total and can be downloaded as one CSV. Then pick a student in the
+   sidebar ("Or pick one of N graded students") to check and approve their review in tab 3.
 
 ---
 

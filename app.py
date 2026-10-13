@@ -1,16 +1,13 @@
-"""Streamlit interface: one assignment and one student at a time.
+"""Streamlit interface: one assignment at a time, reviewing one student at a time (tab 5 grades many).
 
 Run with:  streamlit run app.py
 """
 from __future__ import annotations
 
-import json
-import re
-
 import pandas as pd
 import streamlit as st
 
-from grader import export
+from grader import batch, export
 from grader.checklist import (Checklist, attach_instruction_context, draft_requirements, draft_rubric_from_text,
                               find_conflicts, parse_requirements_csv, read_rubric_csv,
                               split_per_item_requirements)
@@ -19,7 +16,7 @@ from grader.embeddings import get_embedder
 from grader.evaluate import evaluate_submission
 from grader.extract import has_unread_content, ocr_available, unreadable_parts
 from grader.llm import get_provider
-from grader.models import CORRECTNESS, STATUSES, Criterion, Decision, Evidence, Requirement, Scope
+from grader.models import CORRECTNESS, STATUSES, Criterion, Decision, Requirement, Scope
 from grader.pipeline import draft_feedback, ingest_reference, ingest_submission, read_files
 from grader.scoring import approved_total, score
 from grader.static_code import analyze, summary_text
@@ -32,13 +29,16 @@ DATA = settings.data_dir
 (DATA / "reviews").mkdir(parents=True, exist_ok=True)
 
 
-def slug(*parts: str) -> str:
-    return "__".join(re.sub(r"[^A-Za-z0-9_-]", "_", p) for p in parts)
+slug = batch.slug
+
+
+def get_store():
+    return _store(str(DATA / "chroma"))
 
 
 @st.cache_resource
-def get_store():
-    return ChunkStore(get_embedder(settings), path=str(DATA / "chroma"))
+def _store(path: str):
+    return ChunkStore(get_embedder(settings), path=path)
 
 
 provider = get_provider(settings)
@@ -62,15 +62,25 @@ with st.sidebar:
     course = st.text_input("Course", value="COURSE101")
     assignment = st.text_input("Assignment", value="A1")
     st.caption("Use anonymized student codes such as S001.")
-    student = st.text_input("Student code", value="S001")
+    ss.setdefault("student_code", "S001")
+    student = st.text_input("Student code", key="student_code")
     version = st.text_input("Submission version", value="v1")
+    graded = batch.reviewed_students(DATA, course.strip(), assignment.strip(), version.strip())
+    if graded:
+        def _pick():
+            ss.student_code = ss.pick_student
+        st.selectbox(f"Or pick one of {len(graded)} graded students", graded, index=None,
+                     placeholder="Choose a student", key="pick_student", on_change=_pick)
 
 scope = Scope(course.strip(), assignment.strip(), student.strip(), version.strip())
+if ss.get("decisions_scope") != scope:  # another student or assignment: never show the previous one's results
+    ss.decisions, ss.decisions_scope = None, scope
 checklist_path = DATA / "checklists" / f"{slug(scope.course, scope.assignment)}.json"
 if ss.checklist is None and checklist_path.exists():
     ss.checklist = Checklist.from_json(checklist_path.read_text())
 
-tab1, tab2, tab3, tab4 = st.tabs(["1. Assignment setup", "2. Student submission", "3. Review", "4. Export"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["1. Assignment setup", "2. Student submission", "3. Review", "4. Export",
+                                        "5. Many students"])
 
 # ---------------- 1. assignment setup ----------------
 with tab1:
@@ -238,7 +248,7 @@ with tab3:
         st.info("Approve the checklist in step 1 first.")
     elif not get_store().count(scope):
         st.info("Index this student's submission in step 2 first.")
-    review_path = DATA / "reviews" / f"{slug(scope.course, scope.assignment, scope.student, scope.version)}.json"
+    review_path = batch.review_path(DATA, scope)
 
     if ready and st.button("Run evaluation"):
         bar = st.progress(0.0)
@@ -252,14 +262,15 @@ with tab3:
         ss.decisions, ss.injection_hits = decisions, hits
         ss.review_run = ss.get("review_run", 0) + 1  # fresh TA fields that start from the new suggestions
         ss.ta_feedback = draft_feedback(decisions)
-        review_path.write_text(json.dumps({"decisions": [d.to_dict() for d in decisions],
-                                           "injection_hits": hits}, indent=2))
+        batch.save_review(review_path, scope, decisions, hits,
+                          ss.reports if ss.get("indexed_scope") == scope else None)
+        ss.review_unread = unread
+        ss.review_warnings = unreadable_parts(ss.reports) if ss.get("indexed_scope") == scope else []
 
     if ss.decisions is None and review_path.exists() and ready:
-        saved = json.loads(review_path.read_text())
-        ss.decisions = [Decision(**{**d, "evidence": [Evidence(**e) for e in d["evidence"]]})
-                        for d in saved["decisions"]]
-        ss.injection_hits = saved.get("injection_hits", [])
+        saved = batch.load_review(review_path)
+        ss.decisions, ss.injection_hits = saved["decisions"], saved["injection_hits"]
+        ss.review_unread, ss.review_warnings = saved["unread_content"], saved["extraction_warnings"]
         ss.ta_feedback = draft_feedback(ss.decisions)
 
     if ss.decisions and ready:
@@ -267,8 +278,13 @@ with tab3:
             st.error("The submission contains text that looks like instructions to the grader. "
                      "It was ignored, and every item is flagged for your review:\n\n" +
                      "\n".join(f"- {h}" for h in ss.injection_hits))
-        if ss.get("indexed_scope") == scope and has_unread_content(ss.reports):
-            st.warning("Some content could not be read. Related items are 'Unable to verify', never 'Missing'.")
+        if ss.get("review_unread"):
+            st.warning("Some pictures or pages had little or no readable text, so items they may answer are "
+                       "'Unable to verify'. With 'Deduct points for work that could not be found' on (under "
+                       "Scores), those items lose points and are marked provisional: check them yourself.")
+            if ss.get("review_warnings"):
+                with st.expander("What could not be read"):
+                    st.markdown("\n".join(f"- {w}" for w in ss.review_warnings))
 
         # Widget keys include the student and the evaluation run, so TA fields never carry
         # values over from another student or from an earlier run.
@@ -346,7 +362,7 @@ with tab4:
         record = export.review_record(
             scope, ss.decisions, ss.suggested, ss.get("ta_rows", []), ss.get("approved_points", {}),
             ss.get("approved_total"), ss.get("ta_feedback", ""),
-            unreadable_parts(ss.reports) if ss.get("indexed_scope") == scope else [],
+            unreadable_parts(ss.reports) if ss.get("indexed_scope") == scope else ss.get("review_warnings", []),
             ss.get("injection_hits", []), provider.name)
         base = slug(scope.course, scope.assignment, scope.student, scope.version)
         st.download_button("Download JSON", export.to_json(record), file_name=f"{base}.json")
@@ -354,3 +370,64 @@ with tab4:
                            file_name=f"{base}_requirements.csv")
         st.download_button("Download scores CSV", export.scores_csv(record), file_name=f"{base}_scores.csv")
         st.caption("Exports stay on this computer. Grades are not published anywhere.")
+
+# ---------------- 5. many students ----------------
+with tab5:
+    st.header(f"Grade many students: {scope.course} {scope.assignment} ({scope.version})")
+    st.caption("Each student is read, indexed and reviewed separately, exactly as in tabs 2 and 3. "
+               "Afterwards, pick a student in the sidebar to check and approve their review in tab 3.")
+    cl = ss.checklist
+    if cl is None or not cl.approved:
+        st.info("Approve the checklist in step 1 first.")
+    else:
+        mode = st.radio("How are the files named?", batch.MODES, key="batch_mode")
+        batch_files = st.file_uploader("All students' files", accept_multiple_files=True, key="batch_files")
+        groups, split_warnings = batch.group_by_student(
+            [(f.name, f.getvalue()) for f in batch_files or []], mode)
+        for w in split_warnings:
+            st.warning(w)
+        if groups:
+            done = set(batch.reviewed_students(DATA, scope.course, scope.assignment, scope.version))
+            st.dataframe(pd.DataFrame([{"student": code, "files": ", ".join(n for n, _ in files),
+                                        "already graded": code in done} for code, files in groups.items()]),
+                         use_container_width=True)
+            skip = st.checkbox("Skip students who are already graded", value=True,
+                               help="Lets you continue where you stopped. Untick to grade everyone again.")
+            todo = [c for c in groups if not (skip and c in done)]
+            st.caption(f"{len(todo)} of {len(groups)} students will be graded. Each one takes several minutes "
+                       "with a local model, so keep the computer awake and this page open until it finishes.")
+            if st.button(f"Grade {len(todo)} students", disabled=not todo):
+                bar = st.progress(0.0)
+                for i, code in enumerate(todo):
+                    def tick(j, n, r, i=i, code=code):
+                        bar.progress((i + j / max(n, 1)) / len(todo),
+                                     text=f"Student {i + 1} of {len(todo)} ({code}): checking {r.req_id}...")
+                    s_scope = Scope(scope.course, scope.assignment, code, scope.version)
+                    try:
+                        batch.grade_student(get_store(), provider, cl, s_scope, groups[code], settings, tick)
+                    except Exception as exc:  # one bad submission must not stop the others
+                        st.error(f"{code}: grading failed ({exc}). The other students continue.")
+                bar.progress(1.0, text="All done")
+                ss.decisions = None  # reload the sidebar student's review from disk
+
+    graded = batch.reviewed_students(DATA, scope.course, scope.assignment, scope.version)
+    if cl is not None and graded:
+        st.subheader(f"Graded students ({len(graded)})")
+        as_missing_all = st.checkbox("Deduct points for work that could not be found",
+                                     value=settings.unverified_as_missing, key="batch_as_missing")
+        rows = []
+        for code in graded:
+            saved = batch.load_review(batch.review_path(DATA, Scope(scope.course, scope.assignment, code,
+                                                                    scope.version)))
+            sc = score(cl.criteria, cl.requirements, saved["decisions"], as_missing_all)
+            row = {"student": code, "suggested total": sc.suggested_total, "max": sc.max_total,
+                   "provisional": bool(sc.provisional) or not sc.complete,
+                   "items for TA review": sum(d.ta_review for d in saved["decisions"]),
+                   "unreadable content": saved["unread_content"]}
+            rows.append(row)
+        table = pd.DataFrame(rows)
+        st.dataframe(table, use_container_width=True)
+        st.caption("These are suggested points only. Approve each student's grade in tab 3.")
+        csv_table = table.assign(course=scope.course, assignment=scope.assignment, version=scope.version)
+        st.download_button("Download suggested scores for all students (CSV)", csv_table.to_csv(index=False),
+                           file_name=f"{slug(scope.course, scope.assignment, scope.version)}_all_suggested.csv")
