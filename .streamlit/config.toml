@@ -6,3 +6,7 @@ address = "localhost"
 [browser]
 # Do not send Streamlit usage statistics.
 gatherUsageStats = false
+
+[client]
+# Hide Streamlit's developer menu and its "Deploy" button, which would publish the app online.
+toolbarMode = "minimal"
