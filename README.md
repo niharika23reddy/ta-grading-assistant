@@ -195,6 +195,20 @@ Tests use the offline mock model and hash embeddings, so they need no Ollama.
 
 ---
 
+### Speed
+
+Every requirement is one call to the local model, so a student with 19 requirements makes 19 calls.
+To make grading faster:
+
+- **Judge two requirements at once** (on by default, `LLM_PARALLEL=2`). Ollama must allow it too.
+  Run this once in Terminal, then quit and reopen the Ollama app:
+  `launchctl setenv OLLAMA_NUM_PARALLEL 2`
+- **The model stays loaded** for 30 minutes between calls, so it is not reloaded for every student.
+- **A smaller model** is about twice as fast but less accurate: `ollama pull qwen2.5:3b-instruct`,
+  then set `OLLAMA_MODEL=qwen2.5:3b-instruct` in `.env`. Check its results more carefully.
+- **Grade a class unattended** in tab 5, for example overnight with the Mac plugged in. To stop it
+  sleeping, run `caffeinate -i` in a second Terminal window until grading finishes.
+
 ## 5. Known limitations
 
 - **Not yet tested with a real local model.** The Ollama path is written to Ollama's documented

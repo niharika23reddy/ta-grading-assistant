@@ -27,6 +27,8 @@ class Settings:
     chunk_chars: int
     chunk_overlap: int
     unverified_as_missing: bool = True  # score "Unable to verify" like "Missing" (provisional)
+    llm_parallel: int = 2  # requirements judged at the same time
+    ollama_num_ctx: int = 8192
 
 
 def get_settings(**overrides) -> Settings:
@@ -43,6 +45,8 @@ def get_settings(**overrides) -> Settings:
         chunk_chars=int(os.getenv("CHUNK_CHARS", "900")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
         unverified_as_missing=_bool("UNVERIFIED_AS_MISSING", True),
+        llm_parallel=max(1, int(os.getenv("LLM_PARALLEL", "2"))),
+        ollama_num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "8192")),
     )
     values.update(overrides)
     return Settings(**values)

@@ -256,8 +256,8 @@ with tab3:
         decisions, hits = evaluate_submission(
             cl.requirements, scope, get_store(), provider, unread_content=unread,
             static_facts=summary_text(analyze(ss.reports)) if ss.get("indexed_scope") == scope else "",
-            top_k=settings.top_k,
-            progress=lambda i, n, r: bar.progress(i / n, text=f"Checking {r.req_id}..."))
+            top_k=settings.top_k, parallel=settings.llm_parallel,
+            progress=lambda i, n, r: bar.progress(i / n, text=f"Checked {i} of {n} requirements..."))
         bar.progress(1.0, text="Done")
         ss.decisions, ss.injection_hits = decisions, hits
         ss.review_run = ss.get("review_run", 0) + 1  # fresh TA fields that start from the new suggestions
@@ -401,7 +401,8 @@ with tab5:
                 for i, code in enumerate(todo):
                     def tick(j, n, r, i=i, code=code):
                         bar.progress((i + j / max(n, 1)) / len(todo),
-                                     text=f"Student {i + 1} of {len(todo)} ({code}): checking {r.req_id}...")
+                                     text=f"Student {i + 1} of {len(todo)} ({code}): checked {j} of {n} "
+                                          "requirements...")
                     s_scope = Scope(scope.course, scope.assignment, code, scope.version)
                     try:
                         batch.grade_student(get_store(), provider, cl, s_scope, groups[code], settings, tick)

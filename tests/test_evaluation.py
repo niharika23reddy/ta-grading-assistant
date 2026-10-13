@@ -123,3 +123,59 @@ def test_reference_text_marked_as_not_student_work(store, settings):
                                  unread_content=False)
     assert "<instructor_reference_not_student_work>" in p.prompts[0][1]
     assert not d.evidence[0].verified  # reference text can't be verified as student evidence
+
+
+def test_parallel_evaluation_keeps_order_and_runs_calls_together(store, settings, sample_checklist):
+    import threading
+    import time
+
+    from grader.evaluate import evaluate_submission
+    from grader.llm import get_provider
+    from grader.models import Scope
+    from grader.pipeline import ingest_submission
+    from tests.conftest import submission_files
+
+    scope = Scope("DATA101", "A1", "S001", "v1")
+    ingest_submission(store, scope, submission_files("S001_v1"), settings)
+    reqs = sample_checklist.requirements
+    serial, _ = evaluate_submission(reqs, scope, store, get_provider(settings), unread_content=False)
+
+    class Slow:
+        def __init__(self, inner):
+            self.inner, self.now, self.most, self.lock = inner, 0, 0, threading.Lock()
+
+        def judge(self, *a):
+            with self.lock:
+                self.now += 1
+                self.most = max(self.most, self.now)
+            time.sleep(0.05)
+            with self.lock:
+                self.now -= 1
+            return self.inner.judge(*a)
+
+    slow = Slow(get_provider(settings))
+    seen = []
+    parallel, _ = evaluate_submission(reqs, scope, store, slow, unread_content=False, parallel=3,
+                                      progress=lambda i, n, r: seen.append(i))
+    assert [d.to_dict() for d in parallel] == [d.to_dict() for d in serial]
+    assert slow.most > 1
+    assert seen == list(range(len(reqs) + 1))
+
+
+def test_ollama_request_keeps_model_loaded_and_fits_the_prompt(monkeypatch):
+    from grader.config import get_settings
+    from grader.llm import get_provider
+
+    sent = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": {"content": "{}"}}
+
+    monkeypatch.setattr("grader.llm.requests.post", lambda url, timeout, json: sent.update(json) or Resp())
+    get_provider(get_settings(llm_provider="ollama", ollama_num_ctx=4096)).judge("s", "u", None, [])
+    assert sent["keep_alive"] == "30m"
+    assert sent["options"]["num_ctx"] == 4096 and sent["options"]["temperature"] == 0
