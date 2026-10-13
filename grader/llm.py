@@ -29,16 +29,21 @@ def key_terms(text: str) -> list[str]:
 
 
 class OllamaProvider:
-    def __init__(self, url: str, model: str, timeout: int = 300):
+    def __init__(self, url: str, model: str, timeout: int = 600, num_ctx: int = 8192):
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.num_ctx = num_ctx
         self.name = f"ollama:{model}"
 
     def judge(self, system: str, user: str, requirement: Requirement, chunks: list[Chunk]) -> dict:
         resp = requests.post(f"{self.url}/api/chat", timeout=self.timeout, json={
             "model": self.model, "stream": False, "format": "json",
-            "options": {"temperature": 0},
+            # keep_alive: stay loaded between requirements and students instead of reloading.
+            # num_ctx: room for the whole prompt (Ollama's default can cut off the start of it).
+            # num_predict: stop a runaway answer; a normal one is far shorter.
+            "keep_alive": "30m",
+            "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": 800},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         })
         resp.raise_for_status()
@@ -89,7 +94,7 @@ class MockProvider:
 
 def get_provider(settings):
     if settings.llm_provider == "ollama":
-        return OllamaProvider(settings.ollama_url, settings.ollama_model)
+        return OllamaProvider(settings.ollama_url, settings.ollama_model, num_ctx=settings.ollama_num_ctx)
     if settings.llm_provider == "mock":
         return MockProvider()
     raise ValueError(f"Unknown LLM_PROVIDER '{settings.llm_provider}'")

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .llm import key_terms
 from .models import CORRECTNESS, STATUSES, Chunk, Decision, Evidence, Requirement, Scope
@@ -274,17 +276,49 @@ def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider
                     reasoning, improvement, ta_review, reasons)
 
 
+class _LockedStore:
+    """Lets several requirements be judged at once while store lookups stay one at a time."""
+
+    def __init__(self, store):
+        self._store, self._lock = store, threading.Lock()
+
+    def __getattr__(self, name):
+        attr = getattr(self._store, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            with self._lock:
+                return attr(*args, **kwargs)
+        return call
+
+
 def evaluate_submission(requirements: list[Requirement], scope: Scope, store, provider, *,
                         unread_content: bool, static_facts: str = "", top_k: int = 6,
-                        use_reference: bool = True, progress=None) -> tuple[list[Decision], list[str]]:
+                        use_reference: bool = True, progress=None,
+                        parallel: int = 1) -> tuple[list[Decision], list[str]]:
+    """Judge every requirement. With parallel > 1, that many model calls run at the same time;
+    results keep the checklist order, and progress is reported from the calling thread."""
     all_chunks = store.all_chunks(scope)
     injection_hits = detect_injection(all_chunks)
-    decisions = []
-    for i, req in enumerate(requirements):
-        if progress:
-            progress(i, len(requirements), req)
-        decisions.append(evaluate_requirement(
-            req, scope, store, provider, all_chunks=all_chunks, unread_content=unread_content,
+    if not requirements:
+        return [], injection_hits
+    locked = _LockedStore(store)
+
+    def judge(req):
+        return evaluate_requirement(
+            req, scope, locked, provider, all_chunks=all_chunks, unread_content=unread_content,
             injection_hits=injection_hits, static_facts=static_facts, top_k=top_k,
-            use_reference=use_reference))
+            use_reference=use_reference)
+
+    decisions: list[Decision | None] = [None] * len(requirements)
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+        futures = {pool.submit(judge, req): i for i, req in enumerate(requirements)}
+        if progress:
+            progress(0, len(requirements), requirements[0])
+        for done, fut in enumerate(as_completed(futures), start=1):
+            i = futures[fut]
+            decisions[i] = fut.result()
+            if progress:
+                progress(done, len(requirements), requirements[i])
     return decisions, injection_hits

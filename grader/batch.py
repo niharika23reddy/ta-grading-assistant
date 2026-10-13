@@ -125,7 +125,8 @@ def grade_student(store, provider, checklist, scope: Scope, files: list[tuple[st
     reports, n = ingest_submission(store, scope, files, settings)
     decisions, hits = evaluate_submission(
         checklist.requirements, scope, store, provider, unread_content=has_unread_content(reports),
-        static_facts=summary_text(analyze(reports)), top_k=settings.top_k, progress=progress)
+        static_facts=summary_text(analyze(reports)), top_k=settings.top_k, progress=progress,
+        parallel=settings.llm_parallel)
     path = review_path(settings.data_dir, scope)
     save_review(path, scope, decisions, hits, reports)
     return {"student": scope.student, "chunks": n, "decisions": decisions, "injection_hits": hits,
