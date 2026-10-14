@@ -4,6 +4,8 @@ Run with:  streamlit run app.py
 """
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 import streamlit as st
 
@@ -42,6 +44,22 @@ def _store(path: str):
 
 
 provider = get_provider(settings)
+
+
+def reset_timing() -> None:
+    if hasattr(provider, "take_stats"):
+        provider.take_stats()
+
+
+def timing_note(started: float) -> str:
+    """How long a run took and, for the local model, how much it read and wrote."""
+    secs = time.monotonic() - started
+    note = f"took {int(secs // 60)} min {int(secs % 60)} s"
+    stats = provider.take_stats() if hasattr(provider, "take_stats") else None
+    if stats and stats["calls"]:
+        note += (f"; the model read {stats['read_tokens']:,} new tokens and wrote "
+                 f"{stats['written_tokens']:,} over {stats['calls']} questions")
+    return note
 ss = st.session_state
 ss.setdefault("checklist", None)
 ss.setdefault("reports", [])
@@ -251,6 +269,8 @@ with tab3:
     review_path = batch.review_path(DATA, scope)
 
     if ready and st.button("Run evaluation"):
+        started = time.monotonic()
+        reset_timing()
         bar = st.progress(0.0)
         unread = has_unread_content(ss.reports) if ss.get("indexed_scope") == scope else True
         decisions, hits = evaluate_submission(
@@ -267,6 +287,9 @@ with tab3:
                           ss.reports if ss.get("indexed_scope") == scope else None)
         ss.review_unread = unread
         ss.review_warnings = unreadable_parts(ss.reports) if ss.get("indexed_scope") == scope else []
+        ss.last_timing = (scope, "This evaluation " + timing_note(started) + ".")
+    if ss.get("last_timing") and ss.last_timing[0] == scope:
+        st.caption(ss.last_timing[1])
 
     if ss.decisions is None and review_path.exists() and ready:
         saved = batch.load_review(review_path)
@@ -399,7 +422,10 @@ with tab5:
                        "with a local model, so keep the computer awake and this page open until it finishes.")
             if st.button(f"Grade {len(todo)} students", disabled=not todo):
                 bar = st.progress(0.0)
+                reset_timing()
                 for i, code in enumerate(todo):
+                    started = time.monotonic()
+
                     def tick(j, n, r, i=i, code=code):
                         bar.progress((i + j / max(n, 1)) / len(todo),
                                      text=f"Student {i + 1} of {len(todo)} ({code}): checked {j} of {n} "
@@ -407,6 +433,7 @@ with tab5:
                     s_scope = Scope(scope.course, scope.assignment, code, scope.version)
                     try:
                         batch.grade_student(get_store(), provider, cl, s_scope, groups[code], settings, tick)
+                        st.caption(f"{code}: {timing_note(started)}.")
                     except Exception as exc:  # one bad submission must not stop the others
                         st.error(f"{code}: grading failed ({exc}). The other students continue.")
                 bar.progress(1.0, text="All done")

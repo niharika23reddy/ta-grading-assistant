@@ -210,3 +210,23 @@ def test_short_submission_is_sent_whole_with_the_same_prompt_start(store, settin
     assert not searches
     evaluate_submission(reqs, scope, store, Recorder(), unread_content=False, whole_chars=10)
     assert len(searches) == len(reqs)  # too long to send whole: each requirement searches instead
+
+
+def test_ollama_reports_how_much_it_read_and_wrote(monkeypatch):
+    from grader.config import get_settings
+    from grader.llm import get_provider
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": {"content": "{}"}, "prompt_eval_count": 120, "eval_count": 40,
+                    "total_duration": 2_500_000_000}
+
+    monkeypatch.setattr("grader.llm.requests.post", lambda url, timeout, json: Resp())
+    p = get_provider(get_settings(llm_provider="ollama"))
+    p.judge("s", "u", None, [])
+    p.judge("s", "u", None, [])
+    assert p.take_stats() == {"calls": 2, "read_tokens": 240, "written_tokens": 80, "seconds": 5.0}
+    assert p.take_stats()["calls"] == 0

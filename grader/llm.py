@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 
 import requests
 
@@ -35,6 +36,14 @@ class OllamaProvider:
         self.timeout = timeout
         self.num_ctx = num_ctx
         self.name = f"ollama:{model}"
+        self.stats = {"calls": 0, "read_tokens": 0, "written_tokens": 0, "seconds": 0.0}
+        self._lock = threading.Lock()
+
+    def take_stats(self) -> dict:
+        """Totals since the last call: how much the model read and wrote, and how long it took."""
+        with self._lock:
+            out, self.stats = self.stats, {k: 0 for k in self.stats}
+        return out
 
     def judge(self, system: str, user: str, requirement: Requirement, chunks: list[Chunk]) -> dict:
         resp = requests.post(f"{self.url}/api/chat", timeout=self.timeout, json={
@@ -43,11 +52,17 @@ class OllamaProvider:
             # num_ctx: room for the whole prompt (Ollama's default can cut off the start of it).
             # num_predict: stop a runaway answer; a normal one is far shorter.
             "keep_alive": "30m",
-            "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": 800},
+            "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": 500},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         })
         resp.raise_for_status()
-        return json.loads(resp.json()["message"]["content"])
+        body = resp.json()
+        with self._lock:  # Ollama reports token counts and times in nanoseconds
+            self.stats["calls"] += 1
+            self.stats["read_tokens"] += body.get("prompt_eval_count", 0)
+            self.stats["written_tokens"] += body.get("eval_count", 0)
+            self.stats["seconds"] += body.get("total_duration", 0) / 1e9
+        return json.loads(body["message"]["content"])
 
     def health(self) -> tuple[bool, str]:
         try:
