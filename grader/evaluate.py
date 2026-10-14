@@ -149,7 +149,7 @@ def broad_search(requirement: Requirement, all_chunks: list[Chunk], exclude: set
 
 
 def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references: list[Chunk],
-                      static_facts: str, n_screenshots: int = 0) -> str:
+                      static_facts: str, n_screenshots: int = 0, note: str = "") -> str:
     # What is the same for every requirement of a student comes first, so when the whole submission
     # is sent the local model can reuse its work on that part instead of re-reading it each time.
     parts = []
@@ -173,8 +173,36 @@ def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references:
         parts.append("<instructor_reference_not_student_work>\n" +
                      "\n---\n".join(r.text for r in references) +
                      "\n</instructor_reference_not_student_work>")
+    if note:
+        parts.append(note)
     parts.append(f"Judge requirement {requirement.req_id} using only the passages in <student_submission>.")
     return "\n\n".join(parts)
+
+
+SECOND_LOOK_NOTE = ("A first reading of the whole submission did not find this work. These are the passages most "
+                     "related to the requirement. Look again carefully: the work may be in screenshot OCR text, under "
+                     "a different heading, or described in different words. Say \"Met\" if these passages show it.")
+SECOND_LOOK_MAX = 10
+RANK = {"Met": 3, "Partially met": 2, "Unable to verify": 1, "Missing": 0}
+
+
+def focused_passages(requirement: Requirement, scope: Scope, store, all_chunks: list[Chunk],
+                     top_k: int) -> list[Chunk]:
+    """The passages most likely to hold this requirement's work, for a second look."""
+    out: list[Chunk] = []
+
+    def add(chunks):
+        for c in chunks:
+            if c.chunk_id not in {o.chunk_id for o in out}:
+                out.append(c)
+    commands = instructed_commands(requirement)
+    add(c for c in all_chunks if any(cmd in _ocr_norm(c.text) for cmd in commands))
+    add(store.search(scope, search_query(requirement), k=top_k))
+    add(broad_search(requirement, all_chunks, {c.chunk_id for c in out}))
+    if asks_for_screenshot(requirement):
+        add(screenshot_candidates(requirement, all_chunks))
+    order = {c.chunk_id: i for i, c in enumerate(all_chunks)}
+    return sorted(out[:SECOND_LOOK_MAX], key=lambda c: order.get(c.chunk_id, 0))
 
 
 def verify_evidence(raw: list, chunks: list[Chunk]) -> list[Evidence]:
@@ -203,7 +231,7 @@ def verify_evidence(raw: list, chunks: list[Chunk]) -> list[Evidence]:
 def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider, *,
                          all_chunks: list[Chunk], unread_content: bool, injection_hits: list[str],
                          static_facts: str = "", top_k: int = 6, use_reference: bool = True,
-                         whole_chars: int = 0) -> Decision:
+                         whole_chars: int = 0, second_look: bool = False) -> Decision:
     reasons: list[str] = []
 
     if all_chunks and sum(len(c.text) for c in all_chunks) <= whole_chars:
@@ -228,6 +256,23 @@ def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider
         return Decision(requirement.req_id, requirement.description, "Unable to verify", "Not assessed", [],
                         f"The language model could not be used: {exc}", "", True,
                         ["Model call failed; review manually."])
+
+    if second_look and all_chunks and raw.get("status") != "Met":
+        # A small model often overlooks work in a long prompt. Before anything counts against the
+        # student, ask again with only the passages most related to this requirement, and keep the
+        # better answer only if its quotes are really in the submission.
+        focused = focused_passages(requirement, scope, store, all_chunks, top_k)
+        if focused:
+            try:
+                again = provider.judge(SYSTEM_PROMPT, build_user_prompt(
+                    requirement, focused, references, static_facts, n_screenshots, SECOND_LOOK_NOTE),
+                    requirement, focused)
+            except Exception:
+                again = {}
+            if (RANK.get(again.get("status"), -1) > RANK.get(raw.get("status"), -1)
+                    and any(e.verified for e in verify_evidence(again.get("evidence"), focused))):
+                raw, candidates = again, focused
+                reasons.append("Found on a second, closer look at the most related passages.")
 
     status = raw.get("status") if raw.get("status") in STATUSES else "Unable to verify"
     if raw.get("status") not in STATUSES:
@@ -307,7 +352,7 @@ class _LockedStore:
 def evaluate_submission(requirements: list[Requirement], scope: Scope, store, provider, *,
                         unread_content: bool, static_facts: str = "", top_k: int = 6,
                         use_reference: bool = True, progress=None, parallel: int = 1,
-                        whole_chars: int = 0) -> tuple[list[Decision], list[str]]:
+                        whole_chars: int = 0, second_look: bool = False) -> tuple[list[Decision], list[str]]:
     """Judge every requirement. With parallel > 1, that many model calls run at the same time;
     results keep the checklist order, and progress is reported from the calling thread."""
     all_chunks = store.all_chunks(scope)
@@ -320,7 +365,7 @@ def evaluate_submission(requirements: list[Requirement], scope: Scope, store, pr
         return evaluate_requirement(
             req, scope, locked, provider, all_chunks=all_chunks, unread_content=unread_content,
             injection_hits=injection_hits, static_facts=static_facts, top_k=top_k,
-            use_reference=use_reference, whole_chars=whole_chars)
+            use_reference=use_reference, whole_chars=whole_chars, second_look=second_look)
 
     decisions: list[Decision | None] = [None] * len(requirements)
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
