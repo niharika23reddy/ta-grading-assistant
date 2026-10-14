@@ -32,7 +32,8 @@ Rules:
   Use "Not assessed" when correctness cannot be judged from text alone (e.g. code would have to run)
   or when the work is missing.
 - Every claim that work is present must cite evidence: the passage label (e.g. "C2") and an EXACT
-  quote copied from that passage. Do not paraphrase quotes.
+  quote copied from that passage. Do not paraphrase quotes. Keep each quote short (one line, under
+  20 words) and cite at most two.
 - Students paste screenshots into their reports. A screenshot appears in the passages as a marker
   "[Screenshot N: OCR text of the image begins]" followed by the text read from the image, or as
   "[Screenshot N: image present; ...]" when its text could not be read. Either marker PROVES a
@@ -48,8 +49,8 @@ Rules:
 Reply with JSON only:
 {"status": "...", "correctness": "...",
  "evidence": [{"chunk": "C1", "quote": "exact text"}],
- "reasoning": "one to three sentences",
- "improvement": "one concrete suggestion for the student, or empty if fully met",
+ "reasoning": "one short sentence",
+ "improvement": "one short suggestion for the student, or empty if fully met",
  "needs_ta_review": true/false, "review_reason": "why, if true"}"""
 
 
