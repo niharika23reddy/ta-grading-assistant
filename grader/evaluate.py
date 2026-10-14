@@ -149,19 +149,11 @@ def broad_search(requirement: Requirement, all_chunks: list[Chunk], exclude: set
 
 def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references: list[Chunk],
                       static_facts: str, n_screenshots: int = 0) -> str:
-    parts = [f"Requirement {requirement.req_id}: {requirement.description}"]
-    if requirement.notes:
-        parts.append(f"TA notes on this requirement: {requirement.notes}")
-    if requirement.needs_execution:
-        parts.append("This requirement depends on running code. The code has NOT been run. "
-                     "Judge only what is visible statically and set correctness to \"Not assessed\" "
-                     "unless correctness is evident from the text.")
+    # What is the same for every requirement of a student comes first, so when the whole submission
+    # is sent the local model can reuse its work on that part instead of re-reading it each time.
+    parts = []
     if static_facts:
         parts.append("Static analysis facts (code parsed, not executed):\n" + static_facts)
-    if references:
-        parts.append("<instructor_reference_not_student_work>\n" +
-                     "\n---\n".join(r.text for r in references) +
-                     "\n</instructor_reference_not_student_work>")
     if n_screenshots:
         parts.append(f"The whole submission contains {n_screenshots} screenshot(s). Passages marked "
                      "\"contains screenshot text\" include OCR text read from them.")
@@ -169,6 +161,18 @@ def build_user_prompt(requirement: Requirement, chunks: list[Chunk], references:
         f"[C{i}] ({c.location()}{'; contains screenshot text' if c.ocr else ''})\n{c.text}"
         for i, c in enumerate(chunks, start=1))
     parts.append(f"<student_submission>\n{passages}\n</student_submission>")
+    parts.append(f"Requirement {requirement.req_id}: {requirement.description}")
+    if requirement.notes:
+        parts.append(f"TA notes on this requirement: {requirement.notes}")
+    if requirement.needs_execution:
+        parts.append("This requirement depends on running code. The code has NOT been run. "
+                     "Judge only what is visible statically and set correctness to \"Not assessed\" "
+                     "unless correctness is evident from the text.")
+    if references:
+        parts.append("<instructor_reference_not_student_work>\n" +
+                     "\n---\n".join(r.text for r in references) +
+                     "\n</instructor_reference_not_student_work>")
+    parts.append(f"Judge requirement {requirement.req_id} using only the passages in <student_submission>.")
     return "\n\n".join(parts)
 
 
@@ -197,14 +201,20 @@ def verify_evidence(raw: list, chunks: list[Chunk]) -> list[Evidence]:
 
 def evaluate_requirement(requirement: Requirement, scope: Scope, store, provider, *,
                          all_chunks: list[Chunk], unread_content: bool, injection_hits: list[str],
-                         static_facts: str = "", top_k: int = 6, use_reference: bool = True) -> Decision:
+                         static_facts: str = "", top_k: int = 6, use_reference: bool = True,
+                         whole_chars: int = 0) -> Decision:
     reasons: list[str] = []
 
-    retrieved = store.search(scope, search_query(requirement), k=top_k)
-    extra = broad_search(requirement, all_chunks, {c.chunk_id for c in retrieved})
-    candidates = retrieved + extra
-    if asks_for_screenshot(requirement) and not any(c.ocr for c in candidates):
-        candidates += screenshot_candidates(requirement, all_chunks)
+    if all_chunks and sum(len(c.text) for c in all_chunks) <= whole_chars:
+        # A short submission is sent whole: nothing can be missed by the search, and the prompt
+        # starts the same for every requirement, so the model does not re-read it each time.
+        candidates = list(all_chunks)
+    else:
+        retrieved = store.search(scope, search_query(requirement), k=top_k)
+        extra = broad_search(requirement, all_chunks, {c.chunk_id for c in retrieved})
+        candidates = retrieved + extra
+        if asks_for_screenshot(requirement) and not any(c.ocr for c in candidates):
+            candidates += screenshot_candidates(requirement, all_chunks)
 
     references = (store.reference_chunks(scope.course, scope.assignment, requirement.description)
                   if use_reference and requirement.check_correctness else [])
@@ -295,8 +305,8 @@ class _LockedStore:
 
 def evaluate_submission(requirements: list[Requirement], scope: Scope, store, provider, *,
                         unread_content: bool, static_facts: str = "", top_k: int = 6,
-                        use_reference: bool = True, progress=None,
-                        parallel: int = 1) -> tuple[list[Decision], list[str]]:
+                        use_reference: bool = True, progress=None, parallel: int = 1,
+                        whole_chars: int = 0) -> tuple[list[Decision], list[str]]:
     """Judge every requirement. With parallel > 1, that many model calls run at the same time;
     results keep the checklist order, and progress is reported from the calling thread."""
     all_chunks = store.all_chunks(scope)
@@ -309,7 +319,7 @@ def evaluate_submission(requirements: list[Requirement], scope: Scope, store, pr
         return evaluate_requirement(
             req, scope, locked, provider, all_chunks=all_chunks, unread_content=unread_content,
             injection_hits=injection_hits, static_facts=static_facts, top_k=top_k,
-            use_reference=use_reference)
+            use_reference=use_reference, whole_chars=whole_chars)
 
     decisions: list[Decision | None] = [None] * len(requirements)
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:

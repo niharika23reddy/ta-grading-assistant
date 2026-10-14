@@ -179,3 +179,34 @@ def test_ollama_request_keeps_model_loaded_and_fits_the_prompt(monkeypatch):
     get_provider(get_settings(llm_provider="ollama", ollama_num_ctx=4096)).judge("s", "u", None, [])
     assert sent["keep_alive"] == "30m"
     assert sent["options"]["num_ctx"] == 4096 and sent["options"]["temperature"] == 0
+
+
+def test_short_submission_is_sent_whole_with_the_same_prompt_start(store, settings, sample_checklist):
+    from grader.evaluate import evaluate_submission
+    from grader.models import Scope
+    from grader.pipeline import ingest_submission
+    from tests.conftest import submission_files
+
+    scope = Scope("DATA101", "A1", "S001", "v1")
+    ingest_submission(store, scope, submission_files("S001_v1"), settings)
+    n_chunks = len(store.all_chunks(scope))
+    prompts = []
+
+    class Recorder:
+        def judge(self, system, user, requirement, chunks):
+            prompts.append((user, len(chunks)))
+            return {"status": "Unable to verify", "correctness": "Not assessed", "evidence": []}
+
+    reqs = sample_checklist.requirements
+    evaluate_submission(reqs, scope, store, Recorder(), unread_content=False, whole_chars=100_000)
+    assert all(n == n_chunks for _, n in prompts)
+    starts = {u.split("</student_submission>")[0] for u, _ in prompts}
+    assert len(starts) == 1  # identical up to the end of the submission, so the model can reuse it
+
+    searches = []
+    real_search = store.search
+    store.search = lambda *a, **k: searches.append(1) or real_search(*a, **k)
+    evaluate_submission(reqs, scope, store, Recorder(), unread_content=False, whole_chars=100_000)
+    assert not searches
+    evaluate_submission(reqs, scope, store, Recorder(), unread_content=False, whole_chars=10)
+    assert len(searches) == len(reqs)  # too long to send whole: each requirement searches instead

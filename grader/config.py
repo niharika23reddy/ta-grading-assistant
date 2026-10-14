@@ -29,6 +29,7 @@ class Settings:
     unverified_as_missing: bool = True  # score "Unable to verify" like "Missing" (provisional)
     llm_parallel: int = 2  # requirements judged at the same time
     ollama_num_ctx: int = 8192
+    whole_submission_chars: int = 12000  # send submissions up to this size whole (0 = always search)
 
 
 def get_settings(**overrides) -> Settings:
@@ -47,6 +48,7 @@ def get_settings(**overrides) -> Settings:
         unverified_as_missing=_bool("UNVERIFIED_AS_MISSING", True),
         llm_parallel=max(1, int(os.getenv("LLM_PARALLEL", "2"))),
         ollama_num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "8192")),
+        whole_submission_chars=int(os.getenv("WHOLE_SUBMISSION_CHARS", "12000")),
     )
     values.update(overrides)
     return Settings(**values)
