@@ -230,3 +230,65 @@ def test_ollama_reports_how_much_it_read_and_wrote(monkeypatch):
     p.judge("s", "u", None, [])
     assert p.take_stats() == {"calls": 2, "read_tokens": 240, "written_tokens": 80, "seconds": 5.0}
     assert p.take_stats()["calls"] == 0
+
+
+def test_second_look_rescues_work_the_first_reading_missed(store, settings, sample_checklist):
+    from grader.evaluate import SECOND_LOOK_NOTE
+
+    scope = Scope("DATA101", "A1", "S001", "v1")
+    ingest_submission(store, scope, submission_files("S001_v1"), settings)
+    calls = []
+
+    class FirstMissesThenFinds:
+        def judge(self, system, user, requirement, chunks):
+            calls.append(SECOND_LOOK_NOTE in user)
+            if SECOND_LOOK_NOTE not in user:
+                return {"status": "Missing", "correctness": "Not assessed", "evidence": []}
+            line = next(ln for ln in chunks[0].text.splitlines() if ln.strip())
+            return {"status": "Met", "correctness": "Correct", "evidence": [{"chunk": "C1", "quote": line.strip()}]}
+
+    req = sample_checklist.requirements[0]
+    decisions, _ = evaluate_submission([req], scope, store, FirstMissesThenFinds(), unread_content=False,
+                                       whole_chars=100_000, second_look=True)
+    assert calls == [False, True]
+    assert decisions[0].status == "Met" and decisions[0].evidence[0].verified
+    assert any("second" in r for r in decisions[0].review_reasons)
+
+    # Off: the first answer stands and no second call is made.
+    calls.clear()
+    decisions, _ = evaluate_submission([req], scope, store, FirstMissesThenFinds(), unread_content=False,
+                                       whole_chars=100_000, second_look=False)
+    assert calls == [False] and decisions[0].status == "Missing"
+
+
+def test_second_look_needs_real_quotes_to_change_the_answer(store, settings, sample_checklist):
+    scope = Scope("DATA101", "A1", "S001", "v1")
+    ingest_submission(store, scope, submission_files("S001_v1"), settings)
+
+    class MadeUpQuote:
+        n = 0
+
+        def judge(self, system, user, requirement, chunks):
+            self.n += 1
+            if self.n == 1:
+                return {"status": "Missing", "correctness": "Not assessed", "evidence": []}
+            return {"status": "Met", "correctness": "Correct", "evidence": [{"chunk": "C1", "quote": "not in it"}]}
+
+    decisions, _ = evaluate_submission(sample_checklist.requirements[:1], scope, store, MadeUpQuote(),
+                                       unread_content=False, second_look=True)
+    assert decisions[0].status == "Missing"
+
+
+def test_met_answers_are_not_asked_twice(store, settings, sample_checklist):
+    scope = Scope("DATA101", "A1", "S001", "v1")
+    ingest_submission(store, scope, submission_files("S001_v1"), settings)
+    calls = []
+
+    class AlwaysMet:
+        def judge(self, system, user, requirement, chunks):
+            calls.append(1)
+            return {"status": "Met", "correctness": "Correct", "evidence": []}
+
+    evaluate_submission(sample_checklist.requirements, scope, store, AlwaysMet(), unread_content=False,
+                        second_look=True)
+    assert len(calls) == len(sample_checklist.requirements)

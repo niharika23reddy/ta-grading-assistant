@@ -9,7 +9,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from grader import batch, export
+from grader import accuracy, batch, export
 from grader.checklist import (Checklist, attach_instruction_context, draft_requirements, draft_rubric_from_text,
                               find_conflicts, parse_requirements_csv, read_rubric_csv,
                               split_per_item_requirements)
@@ -277,7 +277,7 @@ with tab3:
             cl.requirements, scope, get_store(), provider, unread_content=unread,
             static_facts=summary_text(analyze(ss.reports)) if ss.get("indexed_scope") == scope else "",
             top_k=settings.top_k, parallel=settings.llm_parallel,
-            whole_chars=settings.whole_submission_chars,
+            whole_chars=settings.whole_submission_chars, second_look=settings.second_look,
             progress=lambda i, n, r: bar.progress(i / n, text=f"Checked {i} of {n} requirements..."))
         bar.progress(1.0, text="Done")
         ss.decisions, ss.injection_hits = decisions, hits
@@ -460,3 +460,27 @@ with tab5:
         csv_table = table.assign(course=scope.course, assignment=scope.assignment, version=scope.version)
         st.download_button("Download suggested scores for all students (CSV)", csv_table.to_csv(index=False),
                            file_name=f"{slug(scope.course, scope.assignment, scope.version)}_all_suggested.csv")
+
+        st.subheader("Check accuracy against your grades")
+        st.caption("Type the grade you gave each student, then save. Your grades stay on this computer.")
+        g_path = accuracy.grades_path(DATA, scope.course, scope.assignment, scope.version)
+        mine = accuracy.load_grades(g_path)
+        edited = st.data_editor(
+            table[["student", "suggested total"]].assign(**{"your grade": [mine.get(c) for c in table["student"]]}),
+            disabled=["student", "suggested total"], use_container_width=True, key="ta_grades_editor",
+            column_config={"your grade": st.column_config.NumberColumn(min_value=0.0, max_value=float(table["max"].max()))})
+        typed = {r["student"]: float(r["your grade"]) for _, r in edited.iterrows() if pd.notna(r["your grade"])}
+        if st.button("Save my grades"):
+            accuracy.save_grades(g_path, typed)
+            st.success(f"Saved {len(typed)} grades.")
+        result = accuracy.compare({r["student"]: (typed[r["student"]], r["suggested total"])
+                                   for _, r in table.iterrows() if r["student"] in typed})
+        if result:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Within 1 point of you", f"{result['within_1']}%")
+            c2.metric("Within 2 points of you", f"{result['within_2']}%")
+            c3.metric("Average gap", f"{result['average_gap']:g} points")
+            st.caption(f"Compared {result['students']} students: the app was lower than you for "
+                       f"{result['too_low']} and higher for {result['too_high']}. Biggest gaps first:")
+            st.dataframe(pd.DataFrame(result["gaps"], columns=["student", "app minus you"]),
+                         use_container_width=True)

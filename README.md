@@ -204,6 +204,19 @@ To make grading faster:
   size is sent whole, with the same opening for every requirement, so the model reuses what it
   already read and only processes the new question. This is the biggest saving. Longer
   submissions are searched per requirement as before.
+
+## Accuracy
+
+- **Second look** (`SECOND_LOOK=true`). A small local model often overlooks work in a long
+  prompt, which made it deduct points for work that was there. Now any item it does not judge
+  "Met" is checked again against only the passages most related to it (screenshots showing the
+  instructed command, keyword and vector search). The better answer is kept only if its quotes
+  are really in the submission, and it is flagged "Found on a second, closer look" for you.
+  This adds a model call for each such item, so grading takes somewhat longer.
+- **Check accuracy against your grades** (tab 5, under the graded students). Type the grade you
+  gave each student and the app shows how many suggestions were within 1 and 2 points of yours,
+  the average gap, and the biggest gaps. Your grades are saved in `data/ta_grades` on this
+  computer only.
 - **Judge two requirements at once** (on by default, `LLM_PARALLEL=2`). Ollama must allow it too.
   Run this once in Terminal, then quit and reopen the Ollama app:
   `launchctl setenv OLLAMA_NUM_PARALLEL 2`
